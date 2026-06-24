@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Sarg338/steam-mcp",
-  "description": "Read-only Steam: friends, games, playtime, achievements, sales, and more. Get game recommendations and plan a Co-op night with your friends.",
+  "description": "Read-only Steam: friends, games, achievements, sales, plus game recommendations and co-op nights.",
   "title": "Steam (read-only)",
   "repository": {
     "url": "https://github.com/Sarg338/steam-mcp",
     "source": "github"
   },
-  "version": "1.11.0",
+  "version": "1.11.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "steam-mcp",
-      "version": "1.11.0",
+      "version": "1.11.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
