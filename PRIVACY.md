@@ -41,6 +41,13 @@ Requests may include:
   third-party service.
 - **Retention:** none. Nothing is retained between requests beyond the short-lived
   in-memory cache above, which is discarded when the process exits.
+- **If the server asks who you are:** when no `STEAM_USER` is configured and your
+  client supports elicitation, the server may ask once for your Steam account so
+  the "about me" tools have someone to talk about. That answer is held in memory
+  for the life of the process — so you are asked once rather than once per call —
+  and is never written to disk or sent anywhere but Valve's endpoints. It is a
+  public profile name, not a credential. Restarting the server forgets it; setting
+  `STEAM_USER` stops it being asked at all.
 
 ## Data visibility
 

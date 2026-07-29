@@ -4,6 +4,7 @@ Covers the pure helpers, the TTL cache, and the tool logic with mocked HTTP —
 no network and no API key required. Run with: pytest -q
 """
 import asyncio
+import inspect
 import json
 import logging
 
@@ -464,8 +465,18 @@ def test_prompt_renders():
     assert "steam_plan_coop_night" in text and "123" in text
 
 
+def _wire(model):
+    """Dump an SDK model to its on-the-wire (camelCase) shape.
+
+    SDK v2 renamed every model attribute to snake_case (`input_schema`,
+    `uri_template`) while keeping the JSON camelCase; v1 named the attributes
+    camelCase directly. Dumping by alias is the one spelling both agree on.
+    """
+    return model.model_dump(by_alias=True)
+
+
 def test_resources_registered():
-    uris = {t.uriTemplate for t in run(S.mcp.list_resource_templates())}
+    uris = {_wire(t)["uriTemplate"] for t in run(S.mcp.list_resource_templates())}
     assert "steam://app/{appid}" in uris
     assert "steam://user/{steamid}" in uris
 
@@ -779,12 +790,12 @@ def test_scrub_api_key():
 
 def test_enforce_host_hook_blocks_redirect_target():
     # The client follows redirects, so the allowlist must be enforced per-hop.
-    run(S._enforce_host(S.httpx.Request(
+    run(S._enforce_host(S.httpx2.Request(
         "GET", "https://api.steampowered.com/x?key=secret")))  # allowed: no raise
     for bad in ("http://169.254.169.254/latest/meta-data",  # cloud metadata
                 "https://evil.example.com/"):
         with pytest.raises(S.SteamApiError):
-            run(S._enforce_host(S.httpx.Request("GET", bad)))
+            run(S._enforce_host(S.httpx2.Request("GET", bad)))
 
 
 def test_handle_error_scrubs_key_from_steamapi_error():
@@ -844,10 +855,12 @@ def test_rate_limiter_bucket(monkeypatch):
 
 
 def test_http_logging_silenced():
-    # The API key rides in request URLs (?key=); httpx/httpcore log those at INFO,
-    # so importing the server must have quieted them to keep the key out of logs.
-    assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("httpcore").level == logging.WARNING
+    # The API key rides in request URLs (?key=); the HTTP stack logs those at
+    # INFO, so importing the server must have quieted them to keep the key out of
+    # logs. httpx2/httpcore2 are the ones our own client writes to — a migration
+    # that renamed the library without renaming these would silently leak the key.
+    for name in ("httpx2", "httpcore2", "httpx", "httpcore"):
+        assert logging.getLogger(name).level == logging.WARNING, name
 
 
 # --------------------------------------------------------------------------- #
@@ -1631,7 +1644,7 @@ def test_tools_registered():
     assert "steam_get_market_price" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
-    schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
+    schema = json.dumps(_wire(by_name["steam_get_app_reviews"])["inputSchema"])
     assert "appid" in schema and "review_filter" in schema
 
 
@@ -1714,3 +1727,234 @@ def test_friends_who_own(monkeypatch):
     assert d["friends"][0]["name"] == "Alice"
     assert d["friends"][0]["playing_now"] is True
     assert d["friends"][0]["playtime_hours"] == 10.0
+
+
+# --------------------------------------------------------------------------- #
+# MCP SDK compatibility (v1.x and v2) + cache hints
+# --------------------------------------------------------------------------- #
+
+def test_server_registers_its_surface():
+    """The server object builds on whichever SDK major is installed."""
+    assert len(S.mcp._tool_manager.list_tools()) == 37
+    assert len(S.mcp._prompt_manager.list_prompts()) == 5
+
+
+def test_tool_descriptions_are_trimmed_to_one_line():
+    """_compact_descriptions() reaches into SDK internals; catch it silently
+    no-opping if the tool-manager shape changes under either major."""
+    for tool in S.mcp._tool_manager.list_tools():
+        assert "\n" not in (tool.description or ""), tool.name
+
+
+def test_version_is_in_sync_across_metadata():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
+    for name in ("server.json", "manifest.json"):
+        assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+
+
+def test_cache_hint_methods_are_all_cacheable():
+    """Every key we pass must be a method the spec allows hints on — an unknown
+    key is a ValueError at construction, i.e. a server that won't start."""
+    if not S.MCP_SDK_V2:
+        pytest.skip("cache hints require MCP SDK v2")
+    from mcp_types.methods import CACHEABLE_METHODS
+
+    assert set(S._CACHE_HINT_TTL_MS) <= set(CACHEABLE_METHODS)
+
+
+def test_cache_hints_reach_the_wire():
+    if not S.MCP_SDK_V2:
+        pytest.skip("cache hints require MCP SDK v2")
+    from mcp import Client
+
+    async def go():
+        async with Client(S.mcp) as client:
+            assert client.protocol_version == "2026-07-28"
+            assert client.server_info.version == S.__version__
+            listing = await client.list_tools()
+            assert listing.ttl_ms == S._CACHE_HINT_TTL_MS["tools/list"]
+            assert listing.cache_scope == "public"
+            prompts = await client.list_prompts()
+            assert prompts.ttl_ms == S._CACHE_HINT_TTL_MS["prompts/list"]
+
+    run(go())
+
+
+# --------------------------------------------------------------------------- #
+# Asking the user who they are (v2 SDK: Resolve + Elicit / MRTR)
+# --------------------------------------------------------------------------- #
+
+v2_only = pytest.mark.skipif(not S.MCP_SDK_V2,
+                             reason="resolvers/elicitation require MCP SDK v2")
+
+
+@pytest.fixture
+def no_default_user(monkeypatch):
+    """No STEAM_USER anywhere, and no answer remembered from an earlier call."""
+    monkeypatch.delenv("STEAM_USER", raising=False)
+    monkeypatch.setattr(S, "_dotenv_value", lambda name: "")
+    monkeypatch.setattr(S, "_REMEMBERED_USER", "")
+    yield
+    S._REMEMBERED_USER = ""
+
+
+def _level_backend(monkeypatch):
+    """Stub GetSteamLevel + vanity resolution; record which id was used."""
+    seen = {}
+
+    async def fake_steam(path, params, **k):
+        if "ResolveVanityURL" in path:
+            seen["vanity"] = params.get("vanityurl")
+            return {"response": {"success": 1, "steamid": "76561197960287930"}}
+        if "GetSteamLevel" in path:
+            seen["steamid"] = params.get("steamid")
+            return {"response": {"player_level": 42}}
+        return {}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    return seen
+
+
+def _elicit_client(answer=None, action="accept", **kwargs):
+    """An in-memory client whose elicitation callback records how often it ran."""
+    from mcp import Client
+    from mcp.types import ElicitResult
+
+    asked = {"n": 0}
+
+    async def callback(ctx, params):
+        asked["n"] += 1
+        if action != "accept":
+            return ElicitResult(action=action)
+        return ElicitResult(action="accept", content={"steam_account": answer})
+
+    return Client(S.mcp, elicitation_callback=callback, **kwargs), asked
+
+
+def _call_level(client, args):
+    async def go():
+        async with client as c:
+            return await c.call_tool("steam_get_steam_level", {"params": args})
+
+    return run(go())
+
+
+@v2_only
+def test_resolver_parameter_is_invisible_to_the_model():
+    """The 'who are you' parameter must never reach a tool's input schema."""
+    for tool in run(S.mcp.list_tools()):
+        assert "default_user" not in json.dumps(_wire(tool)["inputSchema"]), tool.name
+
+
+@v2_only
+def test_keyless_finders_never_ask():
+    """discover / should_i_buy / recommend treat an omitted id as 'don't
+    personalize', not 'me' — they must not have the resolver attached."""
+    for name in ("steam_discover", "steam_should_i_buy", "steam_recommend"):
+        fn = S.mcp._tool_manager._tools[name].fn
+        assert "default_user" not in inspect.signature(fn).parameters, name
+
+
+@v2_only
+def test_asks_when_nothing_else_answers_it(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert result.is_error is False
+    assert seen["vanity"] == "gabelogannewell"
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_does_not_ask_when_the_call_carries_an_identity(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+    result = _call_level(client, {"steamid": "76561197960287930"})
+    assert asked["n"] == 0
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_does_not_ask_when_steam_user_is_configured(monkeypatch, no_default_user):
+    _level_backend(monkeypatch)
+    monkeypatch.setattr(S, "_get_default_user", lambda: "76561197960287930")
+    client, asked = _elicit_client(answer="someone-else")
+    result = _call_level(client, {})
+    assert asked["n"] == 0
+    assert result.is_error is False
+
+
+@v2_only
+def test_client_without_elicitation_capability_gets_the_old_error(monkeypatch, no_default_user):
+    """The regression that matters: today's clients can't elicit, and asking one
+    anyway is a protocol error the model can't act on. Stay quiet instead."""
+    from mcp import Client
+
+    _level_backend(monkeypatch)
+
+    async def go():
+        async with Client(S.mcp) as c:
+            return await c.call_tool("steam_get_steam_level", {"params": {}})
+
+    result = run(go())
+    assert "no default user configured" in result.content[0].text.lower()
+    assert "STEAM_USER" in result.content[0].text
+
+
+@v2_only
+def test_declining_falls_back_to_the_error_not_a_protocol_failure(monkeypatch, no_default_user):
+    _level_backend(monkeypatch)
+    client, asked = _elicit_client(action="decline")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert "no default user configured" in result.content[0].text.lower()
+
+
+@v2_only
+def test_an_answer_is_remembered_for_the_rest_of_the_session(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+
+    async def go():
+        async with client as c:
+            await c.call_tool("steam_get_steam_level", {"params": {}})
+            await c.call_tool("steam_get_steam_level", {"params": {}})
+            return await c.call_tool("steam_get_steam_level", {"params": {}})
+
+    result = run(go())
+    assert asked["n"] == 1, "the user must be asked at most once per session"
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_legacy_era_client_is_asked_the_same_question(monkeypatch, no_default_user):
+    """Same tool body, 2025-era push elicitation instead of a multi-round-trip."""
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell", mode="legacy")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_resolver_annotation_is_not_wrapped_in_a_union():
+    """Pin the annotation shape the SDK actually reads.
+
+    `get_type_hints` is what classifies the parameter, and through Python 3.10 it
+    still applies implicit-Optional to a parameter defaulting to None — which
+    would turn `Annotated[..., Resolve(...)]` into `Optional[Annotated[...]]` and
+    fail registration with InvalidSignature. 3.11 dropped that behavior, so this
+    only ever broke on our lowest supported Python.
+    """
+    import typing
+
+    fn = S.mcp._tool_manager._tools["steam_get_wishlist"].fn
+    hint = typing.get_type_hints(fn, include_extras=True)["default_user"]
+    assert typing.get_origin(hint) is not typing.Union
+    assert any(type(m).__name__ == "Resolve" for m in typing.get_args(hint)[1:])

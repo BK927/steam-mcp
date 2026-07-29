@@ -161,6 +161,19 @@ uvx steam-mcp          # zero-install via uv (recommended)
 pip install steam-mcp  # run as: python -m steam_mcp.server
 ```
 
+Both MCP Python SDK majors work (`mcp>=1.28`). On the v2 SDK the server speaks
+spec revision 2026-07-28 — stateless, no `initialize` handshake — advertises
+cache hints on its tool/prompt/resource listings, and can ask you which Steam
+account is yours when `STEAM_USER` isn't set (once per session, and only if your
+client supports elicitation). On the v1.x line it serves the `initialize`
+handshake that modern clients fall back to anyway. Nothing to configure either
+way.
+
+> **TLS note:** the HTTP client is `httpx2`, which verifies certificates against
+> your **operating system's** trust store rather than a bundled CA list. If you
+> run this somewhere minimal (a slim container with no system CA store, or behind
+> a private CA), point `SSL_CERT_FILE` or `SSL_CERT_DIR` at a CA bundle.
+
 ### 3. Add it to your MCP client
 
 The server reads your key from the `STEAM_API_KEY` environment variable.

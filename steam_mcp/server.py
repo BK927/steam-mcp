@@ -20,32 +20,89 @@ Get a key (free): https://steamcommunity.com/dev/apikey
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import os
 import random
 import re
 import time
+from contextvars import ContextVar
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlsplit
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mcp.server.fastmcp import FastMCP
+# SDK compatibility: the MCP Python SDK v2 (released alongside spec revision
+# 2026-07-28) renamed FastMCP -> MCPServer and moved it from mcp.server.fastmcp to
+# mcp.server.mcpserver. The old import path was removed outright, not deprecated,
+# so support both lines: v2 gets the modern (stateless, 2026-07-28) path, v1.x
+# still works for anyone pinned there. Everything we use below — the @tool /
+# @resource / @prompt decorators, run(), and the tool-manager internals — has the
+# same shape on both.
+try:
+    from mcp.server.mcpserver import MCPServer as _ServerClass
+
+    MCP_SDK_V2 = True
+except ImportError:  # pragma: no cover - depends on installed SDK major
+    from mcp.server.fastmcp import FastMCP as _ServerClass
+
+    MCP_SDK_V2 = False
 
 # ---------------------------------------------------------------------------
 # Server + constants
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("steam_mcp")
+__version__ = "1.13.0"
 
-# Security: httpx/httpcore log full request URLs at INFO, and Steam requires the
+# Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
+# tool/prompt/template listings are static for the life of the process (~58 KB of
+# tools/list alone), so clients may hold them for an hour; resource reads follow
+# the appdetails TTL we already apply server-side. `public` is safe because none
+# of these listings vary per caller — this server has no per-user auth, and the
+# one credential (STEAM_API_KEY) belongs to whoever runs it, not to the client.
+_CACHE_HINT_TTL_MS = {
+    "tools/list": 3_600_000,
+    "prompts/list": 3_600_000,
+    "resources/list": 3_600_000,
+    "resources/templates/list": 3_600_000,
+    "resources/read": 600_000,  # matches CACHE_TTL_APPDETAILS (10 min)
+}
+
+
+def _build_server() -> Any:
+    """Construct the MCP server, using v2-only features when they're available.
+
+    `version` and `cache_hints` were both added in SDK v2; passing either to v1's
+    FastMCP is a TypeError, so they're applied only on v2.
+    """
+    if not MCP_SDK_V2:
+        return _ServerClass("steam_mcp")
+
+    from mcp.server.caching import CacheHint
+
+    return _ServerClass(
+        "steam_mcp",
+        version=__version__,
+        cache_hints={
+            method: CacheHint(ttl_ms=ttl, scope="public")
+            for method, ttl in _CACHE_HINT_TTL_MS.items()
+        },
+    )
+
+
+mcp = _build_server()
+
+# Security: the HTTP stack logs full request URLs at INFO, and Steam requires the
 # API key as a `?key=` query param — so quiet those loggers to keep the key out of
-# any logs the host might capture.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# any logs the host might capture. httpx2/httpcore2 are the loggers our own client
+# writes to; the httpx/httpcore pair is still silenced because the v1.x SDK line
+# ships its own client under the old names.
+for _noisy in ("httpx2", "httpcore2", "httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 API_BASE = "https://api.steampowered.com"
 STORE_BASE = "https://store.steampowered.com/api"
@@ -258,14 +315,172 @@ def _get_default_user() -> str:
     (library, achievements, wishlist, friends, ...) work without passing a steamid.
     Returns "" when unset. Not a secret — it's a public profile name.
     """
-    return os.environ.get(ENV_USER, "").strip() or _dotenv_value(ENV_USER)
+    return (
+        os.environ.get(ENV_USER, "").strip()
+        or _dotenv_value(ENV_USER)
+        or _ELICITED_USER.get()
+        or _REMEMBERED_USER
+    )
 
 
-_CLIENT: Optional[httpx.AsyncClient] = None
+# ---------------------------------------------------------------------------
+# Asking the user who they are (MCP SDK v2 only)
+# ---------------------------------------------------------------------------
+#
+# The "about me" tools fall back to STEAM_USER when you omit a steamid. If that
+# isn't configured either, there is nothing to fall back to and the call fails
+# with an explanatory error. On the v2 SDK we can do better: ask.
+#
+# A resolver-backed parameter (`Resolve`) is filled by our own function before
+# the tool body runs, and that function may return `Elicit(...)` to put a
+# question in front of the user. The SDK picks the transport from the negotiated
+# protocol version — a multi-round-trip `tools/call` on 2026-07-28, a push
+# elicitation on 2025-11-25 and earlier — so one code path serves both eras.
+#
+# Deliberate properties, each covered by a test:
+#   - The parameter is invisible to the model: it never appears in the tool's
+#     input schema, and a client that sends one anyway is ignored.
+#   - We only ask when there is nothing else to go on. A call that carries an
+#     identity, a configured STEAM_USER, or an answer given earlier never asks.
+#   - We only ask clients that declared the form-elicitation capability. Without
+#     it the SDK would raise a protocol error the model can't act on, so instead
+#     we stay quiet and let the existing "no default user configured" error
+#     through — today's clients see exactly today's behavior.
+#   - Declining or cancelling is not an error: it falls back to that same error,
+#     which tells the user how to fix it permanently.
+
+_ELICITED_USER: ContextVar[str] = ContextVar("_ELICITED_USER", default="")
+
+# An answer given once is reused for the life of the process, so a user who has
+# no STEAM_USER set is asked at most once per session rather than once per call.
+# It's a public profile name, not a secret, and never written to disk.
+_REMEMBERED_USER = ""
+
+# Fields that carry an identity into a tool. If any is set the caller already
+# said whose data they want, so there is nothing to ask about.
+_IDENTITY_FIELDS = ("steamid", "steamids", "steamid_a", "steamid_b")
+
+
+class SteamAccountAnswer(BaseModel):
+    """The one question we ask the user: which Steam account is theirs."""
+
+    steam_account: str = Field(
+        description="Your Steam profile: the custom-URL name (e.g. 'gabelogannewell'), "
+        "a 17-digit SteamID64, or your full profile URL.",
+        max_length=200,
+    )
+
+
+def _call_carries_identity(params: Any) -> bool:
+    """True if the tool's arguments already name whose data is wanted."""
+    return any(getattr(params, f, None) for f in _IDENTITY_FIELDS)
+
+
+def _client_can_elicit(ctx: Any) -> bool:
+    """True if the client declared the form-elicitation capability.
+
+    Mirrors the SDK's own precondition check: a bare `elicitation: {}` (the only
+    shape before elicitation modes existed) counts as form support, url-only does
+    not. Asking a client that can't answer raises a protocol error instead of
+    reaching the model, so we check first and stay silent otherwise.
+    """
+    caps = getattr(ctx, "client_capabilities", None)
+    elicitation = getattr(caps, "elicitation", None) if caps is not None else None
+    if elicitation is None:
+        return False
+    return elicitation.form is not None or elicitation.url is None
+
+
+if MCP_SDK_V2:
+    from mcp.server.mcpserver import (
+        AcceptedElicitation,
+        Context,
+        Elicit,
+        ElicitationResult,
+        Resolve,
+    )
+
+    async def _ask_default_user(
+        params: Any, ctx: Context
+    ) -> SteamAccountAnswer | Elicit[SteamAccountAnswer]:
+        """Resolver: ask who the user is, but only when nothing else answers it.
+
+        Returning a value instead of an `Elicit` is how a resolver declines to
+        ask — the user is only interrupted when their answer would actually be
+        used.
+        """
+        if (
+            _call_carries_identity(params)
+            or _get_default_user()
+            or not _client_can_elicit(ctx)
+        ):
+            return SteamAccountAnswer(steam_account="")
+        return Elicit(
+            "Which Steam account is yours? (Set STEAM_USER in your MCP client "
+            "config to skip this next time.)",
+            SteamAccountAnswer,
+        )
+
+    def _with_default_user(fn):
+        """Give a tool an invisible, resolver-filled 'who are you' parameter.
+
+        The parameter is appended to a copy of the tool's signature rather than
+        written into its definition, so the 20-odd tools that want this behavior
+        opt in with one decorator and keep their `(params: SomeInput)` shape.
+        """
+        # The default must not be None. Through Python 3.10, get_type_hints()
+        # still applies implicit-Optional to a parameter defaulting to None,
+        # which would turn `Annotated[..., Resolve(...)]` into
+        # `Optional[Annotated[..., Resolve(...)]]` — a union, which the SDK
+        # rejects with InvalidSignature at registration. 3.11 dropped that
+        # behavior, so this only fails on our lowest supported Python.
+        @functools.wraps(fn)
+        async def wrapper(params, default_user=""):
+            answer = ""
+            if isinstance(default_user, AcceptedElicitation):
+                answer = (default_user.data.steam_account or "").strip()
+                if answer:
+                    global _REMEMBERED_USER
+                    _REMEMBERED_USER = answer
+            token = _ELICITED_USER.set(answer)
+            try:
+                return await fn(params)
+            finally:
+                _ELICITED_USER.reset(token)
+
+        # `ElicitationResult[...]` (rather than the bare model) is what makes a
+        # decline reach us as a value to branch on instead of aborting the call.
+        annotation = Annotated[
+            ElicitationResult[SteamAccountAnswer], Resolve(_ask_default_user)
+        ]
+        # eval_str resolves this module's PEP 563 string annotations to real
+        # types; a preset __signature__ is returned verbatim, so the strings
+        # would otherwise reach the SDK's schema builder unevaluated.
+        sig = inspect.signature(fn, eval_str=True)
+        extra = inspect.Parameter(
+            "default_user",
+            inspect.Parameter.KEYWORD_ONLY,
+            annotation=annotation,
+            default="",
+        )
+        wrapper.__signature__ = sig.replace(
+            parameters=[*sig.parameters.values(), extra]
+        )
+        wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
+        wrapper.__annotations__["default_user"] = annotation
+        return wrapper
+
+else:  # v1.x SDK: no resolvers, no elicitation — keep the plain signature.
+
+    def _with_default_user(fn):
+        return fn
+
+
+_CLIENT: Optional[httpx2.AsyncClient] = None
 _CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
-def _http_client() -> httpx.AsyncClient:
+def _http_client() -> httpx2.AsyncClient:
     """Return a shared AsyncClient bound to the *current* event loop.
 
     Reusing one client avoids a fresh TCP/TLS handshake per request and lets the
@@ -279,7 +494,7 @@ def _http_client() -> httpx.AsyncClient:
     global _CLIENT, _CLIENT_LOOP
     loop = asyncio.get_running_loop()
     if _CLIENT is None or _CLIENT.is_closed or _CLIENT_LOOP is not loop:
-        _CLIENT = httpx.AsyncClient(
+        _CLIENT = httpx2.AsyncClient(
             timeout=HTTP_TIMEOUT,
             follow_redirects=True,
             headers={"Accept": "application/json"},
@@ -296,8 +511,8 @@ def _check_host(url: str) -> None:
         raise SteamApiError(f"Refusing request to non-Steam host: {host or url!r}")
 
 
-async def _enforce_host(request: httpx.Request) -> None:
-    """httpx request hook: enforce the allowlist on EVERY hop, including redirects.
+async def _enforce_host(request: httpx2.Request) -> None:
+    """httpx2 request hook: enforce the allowlist on EVERY hop, including redirects.
 
     The client follows redirects, so a pre-flight `_check_host` on the initial URL
     alone would miss a 3xx that leaves the allowlist (e.g. to an internal/metadata
@@ -367,7 +582,7 @@ async def _get_with_retry(client, url: str, params: dict, timeout: float):
         final = attempt == MAX_RETRIES
         try:
             resp = await client.get(url, params=params, timeout=timeout)
-        except httpx.TimeoutException:
+        except httpx2.TimeoutException:
             if final:
                 raise
             await asyncio.sleep(_retry_delay(None, attempt))
@@ -513,7 +728,7 @@ def _handle_error(e: Exception) -> str:
     """Consistent, actionable error formatting across all tools."""
     if isinstance(e, SteamApiError):
         return _scrub(f"Error: {e}")
-    if isinstance(e, httpx.HTTPStatusError):
+    if isinstance(e, httpx2.HTTPStatusError):
         code = e.response.status_code
         if code == 401 or code == 403:
             return (
@@ -533,7 +748,7 @@ def _handle_error(e: Exception) -> str:
                 "or the profile/app has no data for this endpoint."
             )
         return f"Error: Steam API request failed with HTTP {code}."
-    if isinstance(e, httpx.TimeoutException):
+    if isinstance(e, httpx2.TimeoutException):
         return "Error: Request to Steam timed out. Please try again."
     return _scrub(f"Error: Unexpected {type(e).__name__}: {e}")
 
@@ -1030,6 +1245,7 @@ class AppNewsInput(BaseModel):
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_resolve_vanity_url(params: PlayerInput) -> str:
     """Resolve a Steam vanity/custom-URL name (or profile URL) to a SteamID64.
 
@@ -1062,6 +1278,7 @@ async def steam_resolve_vanity_url(params: PlayerInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_player_summary(params: PlayersInput) -> str:
     """Get profile + current status for one or more Steam users.
 
@@ -1115,6 +1332,7 @@ async def steam_get_player_summary(params: PlayersInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_steam_level(params: PlayerInput) -> str:
     """Get a user's Steam community level (the XP-based account level).
 
@@ -1148,6 +1366,7 @@ async def steam_get_steam_level(params: PlayerInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_player_bans(params: PlayerInput) -> str:
     """Get VAC / game / community / economy ban status for a user.
 
@@ -1194,6 +1413,7 @@ async def steam_get_player_bans(params: PlayerInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_friend_list(params: FriendListInput) -> str:
     """List a user's Steam friends, enriched with name and current status.
 
@@ -1329,6 +1549,7 @@ async def _friend_owns_app(fid: str, appid: int) -> dict:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
     """List which of a user's friends own (or are playing) a specific game — "who can I play X with" (about friends' libraries, not store search).
 
@@ -1440,6 +1661,7 @@ async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_owned_games(params: OwnedGamesInput) -> str:
     """List the games a user owns, with total and recent hours played.
 
@@ -1535,6 +1757,7 @@ async def steam_get_owned_games(params: OwnedGamesInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_recently_played_games(params: PlayerInput) -> str:
     """List games a user has played in the last two weeks, with hours.
 
@@ -1592,6 +1815,7 @@ async def steam_get_recently_played_games(params: PlayerInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_player_achievements(params: PlayerGameInput) -> str:
     """Get a user's achievement progress for a specific game.
 
@@ -1785,6 +2009,7 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
     """Get a user's in-game STATS for a specific game (kills, wins, distance, etc.).
 
@@ -1860,6 +2085,7 @@ class RarestUnlocksInput(PlayerGameInput):
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
     """Show a player's RAREST unlocked achievements in a game (by global unlock %).
 
@@ -3240,6 +3466,7 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_wishlist(params: WishlistInput) -> str:
     """Get a user's Steam wishlist, optionally with live prices and sale status.
 
@@ -3489,6 +3716,7 @@ class ComparePlayersInput(BaseModel):
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_player_badges(params: PlayerInput) -> str:
     """Get a user's badges and the XP breakdown behind their Steam level.
 
@@ -3636,6 +3864,7 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_compare_players(params: ComparePlayersInput) -> str:
     """Compare two users' libraries: shared games and who has played each more.
 
@@ -3888,6 +4117,7 @@ class LibraryAnalysisInput(BaseModel):
         "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
     """Analyze a whole game library: backlog, playtime distribution, abandoned games.
 
@@ -4542,6 +4772,7 @@ class PlanCoopNightInput(BaseModel):
         "idempotentHint": True, "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
     """Find co-op games the host and their friends all own — for game night.
 
@@ -4954,6 +5185,7 @@ async def _group_details(gid: str) -> dict:
         "idempotentHint": True, "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_user_groups(params: UserGroupsInput) -> str:
     """List the Steam groups (communities/clans) a user belongs to.
 
@@ -5044,6 +5276,7 @@ class InventoryInput(BaseModel):
         "idempotentHint": True, "openWorldHint": True,
     },
 )
+@_with_default_user
 async def steam_get_inventory(params: InventoryInput) -> str:
     """List a user's Steam inventory — game items or generic Community items.
 
