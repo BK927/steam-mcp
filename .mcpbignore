@@ -28,6 +28,11 @@ _pack_only.bat
 # VCS / tooling
 .git/
 .github/
+# Local agent/IDE config. Untracked and machine-specific, so whatever happens to
+# sit here on the packing machine would otherwise ride along in the bundle.
+.claude/
+.vscode/
+.idea/
 .gitattributes
 .mypy_cache/
 .pytest_cache/

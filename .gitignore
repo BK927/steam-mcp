@@ -28,3 +28,6 @@ PUBLISHING.md
 _*.bat
 /_*.py
 /_*.txt
+
+# Local agent config (machine-specific)
+.claude/settings.local.json
