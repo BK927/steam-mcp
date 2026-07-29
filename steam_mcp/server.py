@@ -428,8 +428,14 @@ if MCP_SDK_V2:
         written into its definition, so the 20-odd tools that want this behavior
         opt in with one decorator and keep their `(params: SomeInput)` shape.
         """
+        # The default must not be None. Through Python 3.10, get_type_hints()
+        # still applies implicit-Optional to a parameter defaulting to None,
+        # which would turn `Annotated[..., Resolve(...)]` into
+        # `Optional[Annotated[..., Resolve(...)]]` — a union, which the SDK
+        # rejects with InvalidSignature at registration. 3.11 dropped that
+        # behavior, so this only fails on our lowest supported Python.
         @functools.wraps(fn)
-        async def wrapper(params, default_user=None):
+        async def wrapper(params, default_user=""):
             answer = ""
             if isinstance(default_user, AcceptedElicitation):
                 answer = (default_user.data.steam_account or "").strip()
@@ -455,7 +461,7 @@ if MCP_SDK_V2:
             "default_user",
             inspect.Parameter.KEYWORD_ONLY,
             annotation=annotation,
-            default=None,
+            default="",
         )
         wrapper.__signature__ = sig.replace(
             parameters=[*sig.parameters.values(), extra]

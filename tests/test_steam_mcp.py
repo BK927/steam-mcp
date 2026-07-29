@@ -1940,3 +1940,21 @@ def test_legacy_era_client_is_asked_the_same_question(monkeypatch, no_default_us
     assert asked["n"] == 1
     assert result.is_error is False
     assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_resolver_annotation_is_not_wrapped_in_a_union():
+    """Pin the annotation shape the SDK actually reads.
+
+    `get_type_hints` is what classifies the parameter, and through Python 3.10 it
+    still applies implicit-Optional to a parameter defaulting to None — which
+    would turn `Annotated[..., Resolve(...)]` into `Optional[Annotated[...]]` and
+    fail registration with InvalidSignature. 3.11 dropped that behavior, so this
+    only ever broke on our lowest supported Python.
+    """
+    import typing
+
+    fn = S.mcp._tool_manager._tools["steam_get_wishlist"].fn
+    hint = typing.get_type_hints(fn, include_extras=True)["default_user"]
+    assert typing.get_origin(hint) is not typing.Union
+    assert any(type(m).__name__ == "Resolve" for m in typing.get_args(hint)[1:])
