@@ -61,6 +61,20 @@ jobs:
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      # The .mcpb desktop bundle is built and attached to the GitHub Release by
+      # hand. When one is present, register it as a second package so the
+      # one-click Claude Desktop install is discoverable through the registry
+      # rather than only from the releases page. The registry requires a
+      # fileSha256, and that has to be the hash of the artifact people actually
+      # download — so it is computed here from the released file instead of being
+      # hand-maintained in git, where it would go stale the moment the bundle is
+      # rebuilt. No bundle attached (or a manual workflow_dispatch run, which has
+      # no release) means the entry is skipped and we publish PyPI-only.
+      - name: Add the .mcpb bundle to server.json (when the release has one)
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/add_mcpb_package.py "$TAG"
       - name: Validate server.json
         run: ./mcp-publisher validate
       - name: Wait for PyPI to propagate
