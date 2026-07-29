@@ -4,6 +4,7 @@ Covers the pure helpers, the TTL cache, and the tool logic with mocked HTTP —
 no network and no API key required. Run with: pytest -q
 """
 import asyncio
+import inspect
 import json
 import logging
 
@@ -789,12 +790,12 @@ def test_scrub_api_key():
 
 def test_enforce_host_hook_blocks_redirect_target():
     # The client follows redirects, so the allowlist must be enforced per-hop.
-    run(S._enforce_host(S.httpx.Request(
+    run(S._enforce_host(S.httpx2.Request(
         "GET", "https://api.steampowered.com/x?key=secret")))  # allowed: no raise
     for bad in ("http://169.254.169.254/latest/meta-data",  # cloud metadata
                 "https://evil.example.com/"):
         with pytest.raises(S.SteamApiError):
-            run(S._enforce_host(S.httpx.Request("GET", bad)))
+            run(S._enforce_host(S.httpx2.Request("GET", bad)))
 
 
 def test_handle_error_scrubs_key_from_steamapi_error():
@@ -854,10 +855,12 @@ def test_rate_limiter_bucket(monkeypatch):
 
 
 def test_http_logging_silenced():
-    # The API key rides in request URLs (?key=); httpx/httpcore log those at INFO,
-    # so importing the server must have quieted them to keep the key out of logs.
-    assert logging.getLogger("httpx").level == logging.WARNING
-    assert logging.getLogger("httpcore").level == logging.WARNING
+    # The API key rides in request URLs (?key=); the HTTP stack logs those at
+    # INFO, so importing the server must have quieted them to keep the key out of
+    # logs. httpx2/httpcore2 are the ones our own client writes to — a migration
+    # that renamed the library without renaming these would silently leak the key.
+    for name in ("httpx2", "httpcore2", "httpx", "httpcore"):
+        assert logging.getLogger(name).level == logging.WARNING, name
 
 
 # --------------------------------------------------------------------------- #
@@ -1777,3 +1780,163 @@ def test_cache_hints_reach_the_wire():
             assert prompts.ttl_ms == S._CACHE_HINT_TTL_MS["prompts/list"]
 
     run(go())
+
+
+# --------------------------------------------------------------------------- #
+# Asking the user who they are (v2 SDK: Resolve + Elicit / MRTR)
+# --------------------------------------------------------------------------- #
+
+v2_only = pytest.mark.skipif(not S.MCP_SDK_V2,
+                             reason="resolvers/elicitation require MCP SDK v2")
+
+
+@pytest.fixture
+def no_default_user(monkeypatch):
+    """No STEAM_USER anywhere, and no answer remembered from an earlier call."""
+    monkeypatch.delenv("STEAM_USER", raising=False)
+    monkeypatch.setattr(S, "_dotenv_value", lambda name: "")
+    monkeypatch.setattr(S, "_REMEMBERED_USER", "")
+    yield
+    S._REMEMBERED_USER = ""
+
+
+def _level_backend(monkeypatch):
+    """Stub GetSteamLevel + vanity resolution; record which id was used."""
+    seen = {}
+
+    async def fake_steam(path, params, **k):
+        if "ResolveVanityURL" in path:
+            seen["vanity"] = params.get("vanityurl")
+            return {"response": {"success": 1, "steamid": "76561197960287930"}}
+        if "GetSteamLevel" in path:
+            seen["steamid"] = params.get("steamid")
+            return {"response": {"player_level": 42}}
+        return {}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    return seen
+
+
+def _elicit_client(answer=None, action="accept", **kwargs):
+    """An in-memory client whose elicitation callback records how often it ran."""
+    from mcp import Client
+    from mcp.types import ElicitResult
+
+    asked = {"n": 0}
+
+    async def callback(ctx, params):
+        asked["n"] += 1
+        if action != "accept":
+            return ElicitResult(action=action)
+        return ElicitResult(action="accept", content={"steam_account": answer})
+
+    return Client(S.mcp, elicitation_callback=callback, **kwargs), asked
+
+
+def _call_level(client, args):
+    async def go():
+        async with client as c:
+            return await c.call_tool("steam_get_steam_level", {"params": args})
+
+    return run(go())
+
+
+@v2_only
+def test_resolver_parameter_is_invisible_to_the_model():
+    """The 'who are you' parameter must never reach a tool's input schema."""
+    for tool in run(S.mcp.list_tools()):
+        assert "default_user" not in json.dumps(_wire(tool)["inputSchema"]), tool.name
+
+
+@v2_only
+def test_keyless_finders_never_ask():
+    """discover / should_i_buy / recommend treat an omitted id as 'don't
+    personalize', not 'me' — they must not have the resolver attached."""
+    for name in ("steam_discover", "steam_should_i_buy", "steam_recommend"):
+        fn = S.mcp._tool_manager._tools[name].fn
+        assert "default_user" not in inspect.signature(fn).parameters, name
+
+
+@v2_only
+def test_asks_when_nothing_else_answers_it(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert result.is_error is False
+    assert seen["vanity"] == "gabelogannewell"
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_does_not_ask_when_the_call_carries_an_identity(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+    result = _call_level(client, {"steamid": "76561197960287930"})
+    assert asked["n"] == 0
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_does_not_ask_when_steam_user_is_configured(monkeypatch, no_default_user):
+    _level_backend(monkeypatch)
+    monkeypatch.setattr(S, "_get_default_user", lambda: "76561197960287930")
+    client, asked = _elicit_client(answer="someone-else")
+    result = _call_level(client, {})
+    assert asked["n"] == 0
+    assert result.is_error is False
+
+
+@v2_only
+def test_client_without_elicitation_capability_gets_the_old_error(monkeypatch, no_default_user):
+    """The regression that matters: today's clients can't elicit, and asking one
+    anyway is a protocol error the model can't act on. Stay quiet instead."""
+    from mcp import Client
+
+    _level_backend(monkeypatch)
+
+    async def go():
+        async with Client(S.mcp) as c:
+            return await c.call_tool("steam_get_steam_level", {"params": {}})
+
+    result = run(go())
+    assert "no default user configured" in result.content[0].text.lower()
+    assert "STEAM_USER" in result.content[0].text
+
+
+@v2_only
+def test_declining_falls_back_to_the_error_not_a_protocol_failure(monkeypatch, no_default_user):
+    _level_backend(monkeypatch)
+    client, asked = _elicit_client(action="decline")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert "no default user configured" in result.content[0].text.lower()
+
+
+@v2_only
+def test_an_answer_is_remembered_for_the_rest_of_the_session(monkeypatch, no_default_user):
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell")
+
+    async def go():
+        async with client as c:
+            await c.call_tool("steam_get_steam_level", {"params": {}})
+            await c.call_tool("steam_get_steam_level", {"params": {}})
+            return await c.call_tool("steam_get_steam_level", {"params": {}})
+
+    result = run(go())
+    assert asked["n"] == 1, "the user must be asked at most once per session"
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
+
+
+@v2_only
+def test_legacy_era_client_is_asked_the_same_question(monkeypatch, no_default_user):
+    """Same tool body, 2025-era push elicitation instead of a multi-round-trip."""
+    seen = _level_backend(monkeypatch)
+    client, asked = _elicit_client(answer="gabelogannewell", mode="legacy")
+    result = _call_level(client, {})
+    assert asked["n"] == 1
+    assert result.is_error is False
+    assert seen["steamid"] == "76561197960287930"
