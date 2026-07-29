@@ -4,6 +4,11 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.12.0]
+- **Fixes a broken install.** The MCP Python SDK v2 removed `mcp.server.fastmcp` outright (FastMCP is now `MCPServer` under `mcp.server.mcpserver`), and our unbounded `mcp>=1.2.0` meant a fresh `uvx steam-mcp` picked up v2 and died with `ModuleNotFoundError`. The server now runs on **both** SDK majors — v2 (spec revision 2026-07-28) and the v1.x maintenance line — and the requirement is `mcp>=1.28`.
+- On the v2 SDK the server speaks spec revision **2026-07-28** (stateless: no `initialize` handshake, no session id) and reports its own `version` in `serverInfo`. On v1.x it keeps using the `initialize` handshake, which modern clients still fall back to after probing `server/discover`.
+- Cache freshness hints (SEP-2549, v2 SDK only): `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list` advertise a 1-hour TTL and `resources/read` 10 minutes, all `public`. Our listings are static for the life of the process, so clients can stop re-fetching ~58 KB of `tools/list` on every reconnect.
+
 ## [1.11.0]
 - New optional `STEAM_USER` config (set it next to your API key to your Steam vanity name / ID / profile URL). The "about me" tools — library, owned games, achievements, wishlist, friends, inventory, level, bans, badges, groups, co-op night, compare — now default to you when you omit the `steamid`, so you don't have to paste your ID every time. Passing a `steamid` still overrides. The keyless game-finders (discover / should_i_buy / recommend) keep personalization explicit.
 

@@ -464,8 +464,18 @@ def test_prompt_renders():
     assert "steam_plan_coop_night" in text and "123" in text
 
 
+def _wire(model):
+    """Dump an SDK model to its on-the-wire (camelCase) shape.
+
+    SDK v2 renamed every model attribute to snake_case (`input_schema`,
+    `uri_template`) while keeping the JSON camelCase; v1 named the attributes
+    camelCase directly. Dumping by alias is the one spelling both agree on.
+    """
+    return model.model_dump(by_alias=True)
+
+
 def test_resources_registered():
-    uris = {t.uriTemplate for t in run(S.mcp.list_resource_templates())}
+    uris = {_wire(t)["uriTemplate"] for t in run(S.mcp.list_resource_templates())}
     assert "steam://app/{appid}" in uris
     assert "steam://user/{steamid}" in uris
 
@@ -1631,7 +1641,7 @@ def test_tools_registered():
     assert "steam_get_market_price" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
-    schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
+    schema = json.dumps(_wire(by_name["steam_get_app_reviews"])["inputSchema"])
     assert "appid" in schema and "review_filter" in schema
 
 
@@ -1714,3 +1724,56 @@ def test_friends_who_own(monkeypatch):
     assert d["friends"][0]["name"] == "Alice"
     assert d["friends"][0]["playing_now"] is True
     assert d["friends"][0]["playtime_hours"] == 10.0
+
+
+# --------------------------------------------------------------------------- #
+# MCP SDK compatibility (v1.x and v2) + cache hints
+# --------------------------------------------------------------------------- #
+
+def test_server_registers_its_surface():
+    """The server object builds on whichever SDK major is installed."""
+    assert len(S.mcp._tool_manager.list_tools()) == 37
+    assert len(S.mcp._prompt_manager.list_prompts()) == 5
+
+
+def test_tool_descriptions_are_trimmed_to_one_line():
+    """_compact_descriptions() reaches into SDK internals; catch it silently
+    no-opping if the tool-manager shape changes under either major."""
+    for tool in S.mcp._tool_manager.list_tools():
+        assert "\n" not in (tool.description or ""), tool.name
+
+
+def test_version_is_in_sync_across_metadata():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
+    for name in ("server.json", "manifest.json"):
+        assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+
+
+def test_cache_hint_methods_are_all_cacheable():
+    """Every key we pass must be a method the spec allows hints on — an unknown
+    key is a ValueError at construction, i.e. a server that won't start."""
+    if not S.MCP_SDK_V2:
+        pytest.skip("cache hints require MCP SDK v2")
+    from mcp_types.methods import CACHEABLE_METHODS
+
+    assert set(S._CACHE_HINT_TTL_MS) <= set(CACHEABLE_METHODS)
+
+
+def test_cache_hints_reach_the_wire():
+    if not S.MCP_SDK_V2:
+        pytest.skip("cache hints require MCP SDK v2")
+    from mcp import Client
+
+    async def go():
+        async with Client(S.mcp) as client:
+            assert client.protocol_version == "2026-07-28"
+            assert client.server_info.version == S.__version__
+            listing = await client.list_tools()
+            assert listing.ttl_ms == S._CACHE_HINT_TTL_MS["tools/list"]
+            assert listing.cache_scope == "public"
+            prompts = await client.list_prompts()
+            assert prompts.ttl_ms == S._CACHE_HINT_TTL_MS["prompts/list"]
+
+    run(go())

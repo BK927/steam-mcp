@@ -161,6 +161,12 @@ uvx steam-mcp          # zero-install via uv (recommended)
 pip install steam-mcp  # run as: python -m steam_mcp.server
 ```
 
+Both MCP Python SDK majors work (`mcp>=1.28`). On the v2 SDK the server speaks
+spec revision 2026-07-28 — stateless, no `initialize` handshake — and advertises
+cache hints on its tool/prompt/resource listings; on the v1.x line it serves the
+`initialize` handshake that modern clients fall back to anyway. Nothing to
+configure either way.
+
 ### 3. Add it to your MCP client
 
 The server reads your key from the `STEAM_API_KEY` environment variable.

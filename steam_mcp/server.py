@@ -33,13 +33,65 @@ from urllib.parse import quote, urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mcp.server.fastmcp import FastMCP
+# SDK compatibility: the MCP Python SDK v2 (released alongside spec revision
+# 2026-07-28) renamed FastMCP -> MCPServer and moved it from mcp.server.fastmcp to
+# mcp.server.mcpserver. The old import path was removed outright, not deprecated,
+# so support both lines: v2 gets the modern (stateless, 2026-07-28) path, v1.x
+# still works for anyone pinned there. Everything we use below — the @tool /
+# @resource / @prompt decorators, run(), and the tool-manager internals — has the
+# same shape on both.
+try:
+    from mcp.server.mcpserver import MCPServer as _ServerClass
+
+    MCP_SDK_V2 = True
+except ImportError:  # pragma: no cover - depends on installed SDK major
+    from mcp.server.fastmcp import FastMCP as _ServerClass
+
+    MCP_SDK_V2 = False
 
 # ---------------------------------------------------------------------------
 # Server + constants
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("steam_mcp")
+__version__ = "1.12.0"
+
+# Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
+# tool/prompt/template listings are static for the life of the process (~58 KB of
+# tools/list alone), so clients may hold them for an hour; resource reads follow
+# the appdetails TTL we already apply server-side. `public` is safe because none
+# of these listings vary per caller — this server has no per-user auth, and the
+# one credential (STEAM_API_KEY) belongs to whoever runs it, not to the client.
+_CACHE_HINT_TTL_MS = {
+    "tools/list": 3_600_000,
+    "prompts/list": 3_600_000,
+    "resources/list": 3_600_000,
+    "resources/templates/list": 3_600_000,
+    "resources/read": 600_000,  # matches CACHE_TTL_APPDETAILS (10 min)
+}
+
+
+def _build_server() -> Any:
+    """Construct the MCP server, using v2-only features when they're available.
+
+    `version` and `cache_hints` were both added in SDK v2; passing either to v1's
+    FastMCP is a TypeError, so they're applied only on v2.
+    """
+    if not MCP_SDK_V2:
+        return _ServerClass("steam_mcp")
+
+    from mcp.server.caching import CacheHint
+
+    return _ServerClass(
+        "steam_mcp",
+        version=__version__,
+        cache_hints={
+            method: CacheHint(ttl_ms=ttl, scope="public")
+            for method, ttl in _CACHE_HINT_TTL_MS.items()
+        },
+    )
+
+
+mcp = _build_server()
 
 # Security: httpx/httpcore log full request URLs at INFO, and Steam requires the
 # API key as a `?key=` query param — so quiet those loggers to keep the key out of
