@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -1958,3 +1959,183 @@ def test_resolver_annotation_is_not_wrapped_in_a_union():
     hint = typing.get_type_hints(fn, include_extras=True)["default_user"]
     assert typing.get_origin(hint) is not typing.Union
     assert any(type(m).__name__ == "Resolve" for m in typing.get_args(hint)[1:])
+
+
+# --------------------------------------------------------------------------- #
+# Keyless surface: which tools need STEAM_API_KEY, and how that is advertised
+# --------------------------------------------------------------------------- #
+
+_MINIMAL_ARGS = {
+    "appid": 570,
+    "query": "dota",
+    "packageid": 1,
+    "published_file_id": "123",
+    "market_hash_name": "AK-47 | Redline (Field-Tested)",
+    "steamid_b": "76561197960287930",
+}
+
+
+def _call_with_no_key(monkeypatch, name):
+    """Run a tool with no key configured and every HTTP call stubbed.
+
+    Returns True if the tool reached for the API key. `_get_with_retry` is the
+    one choke point every request funnels through, and `_steam_get` asks for the
+    key *before* calling it — so a tool that never wants a key never trips this.
+    """
+    import inspect as _inspect
+
+    asked = {"key": False}
+
+    def fake_key():
+        asked["key"] = True
+        raise S.SteamApiError("no key")
+
+    class _Resp:
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        def json(self):
+            return {}
+
+    async def fake_http(client, url, params, timeout):
+        return _Resp()
+
+    # A default user, so the account tools get past SteamID resolution and
+    # actually reach the key check instead of failing earlier for an unrelated
+    # reason. A vanity name rather than a raw ID, because that is what people
+    # actually put in STEAM_USER and resolving one is itself a keyed call — a
+    # 17-digit ID would short-circuit resolution and make tools that genuinely
+    # need a key look keyless.
+    monkeypatch.setenv("STEAM_USER", "gabelogannewell")
+    monkeypatch.setattr(S, "_get_api_key", fake_key)
+    monkeypatch.setattr(S, "_get_with_retry", fake_http)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+    S._CACHE._d.clear()
+
+    fn = S.mcp._tool_manager._tools[name].fn
+    model = list(_inspect.signature(fn, eval_str=True).parameters.values())[0].annotation
+    kwargs = {f: _MINIMAL_ARGS[f] for f, i in model.model_fields.items()
+              if i.is_required()}
+    run(fn(model(**kwargs)))
+    return asked["key"]
+
+
+@pytest.mark.parametrize("name", sorted(S.KEYLESS_TOOLS))
+def test_keyless_tools_never_ask_for_a_key(monkeypatch, name):
+    """The property the marker advertises, asserted against real behavior rather
+    than a guess about which endpoints need credentials."""
+    assert _call_with_no_key(monkeypatch, name) is False
+
+
+@pytest.mark.parametrize("name", sorted(S.PARTLY_KEYLESS_TOOLS))
+def test_partly_keyless_tools_need_no_key_until_personalized(monkeypatch, name):
+    """Called without a steamid they must behave exactly like a keyless tool."""
+    assert _call_with_no_key(monkeypatch, name) is False
+
+
+def test_key_requirement_buckets_are_disjoint():
+    assert not (set(S.KEYLESS_TOOLS) & set(S.PARTLY_KEYLESS_TOOLS))
+
+
+def test_no_tool_is_wrongly_marked_as_needing_a_key(monkeypatch):
+    """The other half of the drift guard.
+
+    A tool that never asks for a key but sits outside both sets gets stamped
+    "unavailable" on a keyless install and the model stops offering it — the
+    exact bug that once hid steam_discover. Sweep every tool and require the two
+    sets to be precisely the ones that run without a key.
+    """
+    free = set()
+    for name in S.mcp._tool_manager._tools:
+        if _call_with_no_key(monkeypatch, name) is False:
+            free.add(name)
+        monkeypatch.undo()
+    declared = set(S.KEYLESS_TOOLS) | set(S.PARTLY_KEYLESS_TOOLS)
+    assert free == declared, (
+        f"run without a key but not declared: {free - declared}; "
+        f"declared but do ask for a key: {declared - free}"
+    )
+
+
+def test_every_keyless_tool_is_registered():
+    names = {t.name for t in S.mcp._tool_manager.list_tools()}
+    assert set(S.KEYLESS_TOOLS) <= names
+    assert set(S.PARTLY_KEYLESS_TOOLS) <= names
+
+
+def _remark(monkeypatch, have_key):
+    monkeypatch.setattr(S, "_have_api_key", lambda: have_key)
+    S._compact_descriptions()
+    return {t.name: (t.description or "") for t in S.mcp._tool_manager.list_tools()}
+
+
+def test_keyed_tools_are_marked_unavailable_without_a_key(monkeypatch):
+    try:
+        descs = _remark(monkeypatch, have_key=False)
+        marked = {n for n, d in descs.items() if S.NEEDS_KEY_MARKER in d}
+        partly = {n for n, d in descs.items() if S.PARTLY_KEYLESS_MARKER in d}
+        clean = set(descs) - marked - partly
+        assert clean == set(S.KEYLESS_TOOLS)
+        assert partly == set(S.PARTLY_KEYLESS_TOOLS)
+        assert len(marked) == 19
+    finally:
+        monkeypatch.undo()
+        S._compact_descriptions()
+
+
+def test_no_marker_costs_nothing_when_a_key_is_configured(monkeypatch):
+    try:
+        descs = _remark(monkeypatch, have_key=True)
+        assert not [d for d in descs.values() if S.NEEDS_KEY_MARKER in d]
+        assert not [d for d in descs.values() if S.PARTLY_KEYLESS_MARKER in d]
+    finally:
+        monkeypatch.undo()
+        S._compact_descriptions()
+
+
+def test_marking_is_idempotent(monkeypatch):
+    """Re-running the compactor must not stack markers or strand a stale one."""
+    try:
+        _remark(monkeypatch, have_key=False)
+        descs = _remark(monkeypatch, have_key=False)
+        owned = descs["steam_get_owned_games"]
+        assert owned.count(S.NEEDS_KEY_MARKER) == 1
+        descs = _remark(monkeypatch, have_key=True)
+        assert S.NEEDS_KEY_MARKER not in descs["steam_get_owned_games"]
+    finally:
+        monkeypatch.undo()
+        S._compact_descriptions()
+
+
+def test_missing_key_error_points_at_the_keyless_alternatives(monkeypatch):
+    monkeypatch.delenv("STEAM_API_KEY", raising=False)
+    monkeypatch.setattr(S, "_dotenv_value", lambda name: "")
+    with pytest.raises(S.SteamApiError) as e:
+        S._get_api_key()
+    msg = str(e.value)
+    assert "steamcommunity.com/dev/apikey" in msg
+    assert str(len(S.KEYLESS_TOOLS)) in msg
+    # names it suggests must actually be keyless, or the advice sends the model
+    # straight into another error
+    usable = set(S.KEYLESS_TOOLS) | set(S.PARTLY_KEYLESS_TOOLS)
+    for name in re.findall(r"steam_[a-z_]+", msg):
+        assert name in usable, name
+
+
+def test_readme_key_column_matches_the_code():
+    """The README's "Needs key?" column and the runtime markers are two renderings
+    of the same fact. Drift means the docs promise something the server denies."""
+    import pathlib
+
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
+    assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
+    for name, marker in rows:
+        if marker == "no":
+            assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
+        elif marker == "no*":
+            assert name in S.PARTLY_KEYLESS_TOOLS, f"{name} documented no*, is not"
+        else:
+            assert name not in S.KEYLESS_TOOLS and name not in S.PARTLY_KEYLESS_TOOLS, (
+                f"{name} documented as needing a key, but runs without one")

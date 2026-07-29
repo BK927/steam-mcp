@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover - depends on installed SDK major
 # Server + constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 # Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
 # tool/prompt/template listings are static for the life of the process (~58 KB of
@@ -296,14 +296,72 @@ def _load_key_from_dotenv() -> str:
     return _dotenv_value(ENV_KEY)
 
 
+# Tools that never touch a credentialed endpoint: the storefront API needs no
+# key, and a handful of Web API endpoints (global achievement percentages, live
+# player counts, the app list, tag weights) are public too — those pass
+# `with_key=False`. Anything tied to a specific account is not on this list.
+#
+# Kept as an explicit set rather than derived at runtime, because "does this tool
+# need a key" can't be introspected without calling it. `test_keyless_tool_set_
+# matches_the_source` re-derives it from the source and fails if the two drift,
+# so adding a tool to the wrong bucket is caught in CI rather than by a user.
+KEYLESS_TOOLS = frozenset({
+    "steam_get_app_details",
+    "steam_get_app_news",
+    "steam_get_app_regional_pricing",
+    "steam_get_app_reviews",
+    "steam_get_app_tags",
+    "steam_get_current_players",
+    "steam_get_deck_compatibility",
+    "steam_get_dlc",
+    "steam_get_featured_specials",
+    "steam_get_global_achievement_percentages",
+    "steam_get_market_price",
+    "steam_get_package_details",
+    "steam_get_store_highlights",
+    "steam_get_workshop_item",
+    "steam_search_apps",
+})
+
+# The game-finders sit in between: they work fully without a key, and only reach
+# for one if you personalize the results by passing a steamid. Marking these
+# "unavailable" without a key would be wrong — they are the most useful things a
+# keyless install can do.
+PARTLY_KEYLESS_TOOLS = frozenset({
+    "steam_discover",
+    "steam_recommend",
+    "steam_should_i_buy",
+})
+
+
+def _have_api_key() -> bool:
+    """True if a Steam Web API key is configured (env or .env)."""
+    return bool(os.environ.get(ENV_KEY, "").strip() or _load_key_from_dotenv())
+
+
 def _get_api_key() -> str:
-    """Read the Steam Web API key from the environment or .env, or raise."""
+    """Read the Steam Web API key from the environment or .env, or raise.
+
+    The error names what still works without a key: most of the store-side
+    surface needs no credential, so a keyless install is a smaller server rather
+    than a broken one, and the model should be told which way to turn.
+    """
     key = os.environ.get(ENV_KEY, "").strip() or _load_key_from_dotenv()
     if not key:
         raise SteamApiError(
-            f"No Steam Web API key configured. Set the {ENV_KEY} environment "
-            f"variable in your MCP client config, or put it in a .env file next to "
-            f"the project. Get a free key at https://steamcommunity.com/dev/apikey"
+            f"This tool needs a Steam Web API key, which is not configured. Set "
+            f"{ENV_KEY} in your MCP client config (or a .env file next to the "
+            f"project); a free key takes a minute at "
+            f"https://steamcommunity.com/dev/apikey\n\n"
+            f"Meanwhile {len(KEYLESS_TOOLS)} tools work without one — including "
+            f"steam_search_apps, steam_get_app_details, steam_get_app_reviews and "
+            f"steam_get_featured_specials for anything about the store or a game "
+            f"itself, steam_get_current_players for live player counts, and "
+            f"steam_get_global_achievement_percentages for achievement rarity. "
+            f"The game-finders (steam_discover, steam_should_i_buy, "
+            f"steam_recommend) also work without a key as long as you don't pass "
+            f"a steamid. Only data tied to a specific *account* (libraries, "
+            f"playtime, friends, personal achievements) needs the key."
         )
     return key
 
@@ -5638,25 +5696,47 @@ async def resource_user(steamid: str) -> str:
     return await steam_get_player_summary(PlayersInput(steamids=[steamid]))
 
 
+NEEDS_KEY_MARKER = " [unavailable: needs STEAM_API_KEY]"
+PARTLY_KEYLESS_MARKER = " [works without a key unless you pass steamid]"
+
+
 def _compact_descriptions() -> None:
     """Trim each tool's *wire* description to its one-line summary.
 
-    FastMCP sends a tool's full docstring as its MCP description, so the model pays
-    for all of them on every request (~5k tokens across our tools). The first line
-    of each docstring is already a complete summary, so the description sent over
-    the wire is trimmed to that — the full docstrings stay in source for humans and
-    IDEs. Best-effort: if the SDK internals change, descriptions simply stay full.
+    The SDK sends a tool's full docstring as its MCP description, so the model
+    pays for all of them on every request (~5k tokens across our tools). The
+    first line of each docstring is already a complete summary, so the
+    description sent over the wire is trimmed to that — the full docstrings stay
+    in source for humans and IDEs. Best-effort: if the SDK internals change,
+    descriptions simply stay full.
+
+    When no API key is configured, the tools that need one are also marked as
+    unavailable. Without that the model picks an account tool, gets an error, and
+    the server looks broken rather than unconfigured — it has no other way to
+    know which half of the surface is live. The marker is deliberately *not*
+    added when a key is present: every tool works then, so it would be pure
+    tokens on every request.
     """
     try:
         tools = list(mcp._tool_manager._tools.values())
     except Exception:  # noqa: BLE001
         return
+    mark_keyed = not _have_api_key()
     for tool in tools:
         desc = (getattr(tool, "description", None) or "").strip()
         if not desc:
             continue
         summary = desc.split("\n\n", 1)[0].split("\n", 1)[0].strip()
-        if summary and len(summary) < len(desc):
+        # Idempotent: drop a marker from a previous pass before deciding again,
+        # so calling this twice never stacks markers or strands a stale one.
+        for marker in (NEEDS_KEY_MARKER, PARTLY_KEYLESS_MARKER):
+            if summary.endswith(marker):
+                summary = summary[: -len(marker)]
+        name = getattr(tool, "name", "")
+        if mark_keyed and name not in KEYLESS_TOOLS:
+            summary += (PARTLY_KEYLESS_MARKER if name in PARTLY_KEYLESS_TOOLS
+                        else NEEDS_KEY_MARKER)
+        if summary and summary != desc:
             try:
                 tool.description = summary
             except Exception:  # noqa: BLE001

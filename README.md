@@ -15,19 +15,39 @@ your friends, games, playtime, and achievements, plus account-independent things
 sales, reviews, live player counts, Steam Deck compatibility, discovery,
 recommendations, and co-op planning.
 
-**Read-only · official Steam APIs only · bring your own key · open source.** Nobody logs
-in; the only credential is the free Steam Web API key you set yourself, and the server
+**Read-only · official Steam APIs only · open source.** Nobody logs in, and the server
 never writes, trades, posts, launches games, or makes purchases.
 
-## Quick start
+## Quick start — no API key needed
 
-Install [`uv`](https://docs.astral.sh/uv/), get a
-[free Steam Web API key](https://steamcommunity.com/dev/apikey), then:
+Install [`uv`](https://docs.astral.sh/uv/), then:
 
 **Claude Code**
 
 ```bash
-claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
+claude mcp add steam -- uvx steam-mcp
+```
+
+That's the whole setup. **15 of the 37 tools work with no credential at all** — anything
+about the store or a game itself:
+
+> *"Is Baldur's Gate 3 worth buying, and how are its recent reviews trending?"*
+> *"What co-op games are on sale under £20 right now?"*
+> *"How many people are playing Helldivers 2 this minute?"*
+> *"Will Hades II run properly on my Steam Deck?"*
+
+The three game-finders (`steam_discover`, `steam_should_i_buy`, `steam_recommend`) work
+without a key too, as long as you don't personalize them.
+
+### Adding your own account
+
+A [free Steam Web API key](https://steamcommunity.com/dev/apikey) (a minute to get)
+unlocks the other 22 — the ones that read a *specific account*: library, playtime,
+friends, achievements, wishlist, inventory. Add `STEAM_USER` too and "my"/"I" default to
+you, so you never have to paste a SteamID:
+
+```bash
+claude mcp add steam --env STEAM_API_KEY=YOUR_KEY --env STEAM_USER=your_steam_name -- uvx steam-mcp
 ```
 
 > Tip: this defaults to the current project. Add `--scope user` only if you want
@@ -35,10 +55,15 @@ claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
 > per-project scope unless Steam is cross-cutting for you.
 
 **Claude Desktop** — download `steam-mcp.mcpb` from the
-[latest release](https://github.com/Sarg338/steam-mcp/releases/latest), open it
-(Settings → Extensions), and paste your key.
+[latest release](https://github.com/Sarg338/steam-mcp/releases/latest) and open it
+(Settings → Extensions). Both fields are optional; leave them blank for the keyless
+tools and fill them in later.
 
 Cursor / Cline / Windsurf and the manual `pip` setup are under [Setup](#setup) below.
+
+> Without a key, the account tools are still listed but marked
+> `[unavailable: needs STEAM_API_KEY]`, so your assistant knows to reach for a keyless
+> tool instead of failing at one it can't use.
 
 ---
 
@@ -101,7 +126,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
 | `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
-| `steam_get_inventory` | **A user's inventory** — game items or Steam Community items (cards, emoticons…), with tradable/marketable flags | no |
+| `steam_get_inventory` | **A user's inventory** — game items or Steam Community items (cards, emoticons…), with tradable/marketable flags | yes† |
 | `steam_get_market_price` | **Community Market price** for an item (lowest/median/24h volume) + type/rarity + CS2 condition | no |
 | `steam_get_player_badges` | Badges + the XP breakdown behind a Steam level | yes |
 | `steam_get_package_details` | Package/bundle price + included games | no |
@@ -119,6 +144,10 @@ localized text accept a `language` parameter — a Steam language name like `fre
 > \* `steam_discover`, `steam_should_i_buy`, and `steam_recommend` need no key for
 > the store data; their **personalization** (passing a `steamid` to use a user's
 > library/taste) requires a key and a public profile.
+>
+> † `steam_get_inventory` reads a keyless endpoint, but it still has to know *whose*
+> inventory — and turning a vanity name (or `STEAM_USER`) into a SteamID64 is itself a
+> keyed call. Pass a raw 17-digit SteamID64 and it works with no key.
 
 ### Prompts & resources
 
@@ -144,11 +173,14 @@ the tools) and **resources** (reference Steam entities by URI):
 
 ## Setup
 
-### 1. Get a free Steam Web API key
+### 1. Get a free Steam Web API key *(optional)*
 
-Visit <https://steamcommunity.com/dev/apikey>, sign in, register a domain (any
-domain you control works; `localhost` is commonly used for personal keys), and
-copy the key. Usage is governed by the
+Skip this if you only want the 15 keyless tools — the server runs fine without a
+key and the account tools simply advertise themselves as unavailable.
+
+To unlock the account tools, visit <https://steamcommunity.com/dev/apikey>, sign in,
+register a domain (any domain you control works; `localhost` is commonly used for
+personal keys), and copy the key. Usage is governed by the
 [Steam Web API Terms of Use](https://steamcommunity.com/dev/apiterms).
 
 ### 2. Install
@@ -176,11 +208,12 @@ way.
 
 ### 3. Add it to your MCP client
 
-The server reads your key from the `STEAM_API_KEY` environment variable.
-Optionally, set `STEAM_USER` to your own Steam name (vanity name, SteamID64, or
-profile URL) so the "about me" tools — *your* library, wishlist, achievements,
-friends — default to you whenever you don't name a user. It's a public profile
+Both settings are optional. `STEAM_API_KEY` unlocks the account tools; `STEAM_USER`
+(your Steam vanity name, SteamID64, or profile URL) makes those tools default to *you*
+whenever you don't name a user, so you never paste a SteamID. It's a public profile
 name, not a secret, and you can still pass a `steamid` to any call to override it.
+
+Configure neither and you get the keyless server; configure both and you get everything.
 
 **Claude Code**
 
