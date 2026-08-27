@@ -313,6 +313,7 @@ def test_discover_personalized(monkeypatch):
 def test_should_i_buy(monkeypatch):
     import time as _t
     now = int(_t.time())
+    review_calls = []
 
     async def fake_store(path, params, cache_ttl=0):
         return {"5": {"success": True, "data": {
@@ -324,15 +325,20 @@ def test_should_i_buy(monkeypatch):
             "metacritic": {"score": 88}}}}
 
     async def fake_raw(url, params, cache_ttl=0):
+        review_calls.append(dict(params))
         if params.get("filter") == "recent":
             return {"success": 1, "cursor": "*", "reviews": [
                 {"voted_up": True, "timestamp_created": now - 10},
                 {"voted_up": True, "timestamp_created": now - 20},
                 {"voted_up": False, "timestamp_created": now - 30},
                 {"voted_up": True, "timestamp_created": now - 99 * 86400}]}  # old -> stop
+        if params["purchase_type"] == "steam":
+            return {"success": 1, "query_summary": {
+                "review_score_desc": "Very Positive", "total_positive": 900,
+                "total_negative": 100, "total_reviews": 1000}}
         return {"success": 1, "query_summary": {
-            "review_score_desc": "Very Positive", "total_positive": 900,
-            "total_negative": 100, "total_reviews": 1000}}
+            "review_score_desc": "Positive", "total_positive": 850,
+            "total_negative": 150, "total_reviews": 1000}}
 
     async def fake_items(appids):
         return {5: [{"tagid": 1, "weight": 10}, {"tagid": 2, "weight": 5}]}
@@ -349,11 +355,21 @@ def test_should_i_buy(monkeypatch):
     assert d["name"] == "Game5"
     assert d["discount_pct"] == 50
     assert d["review_lifetime"]["positive_pct"] == 90.0
+    assert d["review_lifetime"]["scope"] == {
+        "official_store_score": True,
+        "language": "all",
+        "purchase_type": "steam",
+        "offtopic_activity_included": False,
+    }
+    assert d["review_feedback_lifetime"]["positive_pct"] == 85.0
     assert d["review_recent_30d"]["positive_pct"] == 66.7   # 2 of 3 in-window
     assert d["review_recent_30d"]["reviews_counted"] == 3
     assert d["review_trend_pts"] == round(66.7 - 90.0, 1)
     assert d["top_tags"] == ["Action", "Indie"]
     assert d["personal"] is None                            # no steamid
+    assert {(c["language"], c["purchase_type"]) for c in review_calls} == {
+        ("all", "steam"), ("all", "all")
+    }
 
 
 def test_recommend_seed(monkeypatch):
@@ -505,18 +521,30 @@ def test_app_details_language(monkeypatch):
     assert captured.get("l") == "french"
 
 
-def test_app_reviews_language(monkeypatch):
-    captured = {}
+def test_app_reviews_separates_official_and_feedback_populations(monkeypatch):
+    calls = []
 
     async def fake_raw(url, params, cache_ttl=0):
-        captured.update(params)
+        calls.append(dict(params))
+        is_official = params["language"] == "all" and params["purchase_type"] == "steam"
         return {"success": 1, "reviews": [], "query_summary": {
-            "review_score_desc": "x", "total_positive": 1,
-            "total_negative": 0, "total_reviews": 1}}
+            "review_score_desc": "Very Positive" if is_official else "Positive",
+            "total_positive": 9 if is_official else 7,
+            "total_negative": 1 if is_official else 3,
+            "total_reviews": 10}}
 
     monkeypatch.setattr(S, "_raw_get", fake_raw)
-    run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, language="german")))
-    assert captured.get("language") == "german"
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, language="german", purchase_type="all", limit=0,
+        response_format="json")))
+    d = json.loads(out)
+    scopes = {(call["language"], call["purchase_type"]) for call in calls}
+    assert scopes == {("all", "steam"), ("german", "all")}
+    assert d["summary"] == d["official_store_summary"]
+    assert d["summary"]["positive_pct"] == 90.0
+    assert d["feedback_summary"]["positive_pct"] == 70.0
+    assert d["summary"]["scope"]["official_store_score"] is True
+    assert d["feedback_summary"]["scope"]["official_store_score"] is False
 
 
 def test_app_review_sentiment_sample_keeps_overall_summary(monkeypatch):
@@ -538,9 +566,10 @@ def test_app_review_sentiment_sample_keeps_overall_summary(monkeypatch):
     out = run(S.steam_get_app_reviews(S.AppReviewsInput(
         appid=1, review_type="negative", limit=1, response_format="json")))
     d = json.loads(out)
-    assert [call["review_type"] for call in calls] == ["all", "negative"]
-    assert calls[0]["num_per_page"] == 0
-    assert calls[1]["num_per_page"] == 1
+    assert [call["review_type"] for call in calls].count("all") == 2
+    assert [call["review_type"] for call in calls].count("negative") == 1
+    negative_call = next(call for call in calls if call["review_type"] == "negative")
+    assert negative_call["num_per_page"] == 1
     assert d["summary"]["total_positive"] == 8
     assert d["summary"]["total_negative"] == 2
     assert d["summary"]["positive_pct"] == 80.0
@@ -1552,6 +1581,10 @@ def test_app_reviews_recent_window_can_remove_scan_cap(monkeypatch):
                  "timestamp_created": now - 20},
             ]}
         return {"success": 1, "cursor": "page-3", "reviews": [
+            # Cursor pages can overlap while new reviews arrive; bounded dedupe
+            # must keep this from inflating the recent score.
+            {"recommendationid": "2", "voted_up": False,
+             "timestamp_created": now - 20},
             {"recommendationid": "3", "voted_up": True,
              "timestamp_created": now - 30},
             {"recommendationid": "4", "voted_up": True,
@@ -1561,7 +1594,8 @@ def test_app_reviews_recent_window_can_remove_scan_cap(monkeypatch):
     monkeypatch.setattr(S, "_raw_get", fake_raw)
     out = run(S.steam_get_app_reviews(S.AppReviewsInput(
         appid=1, review_filter="recent", recent_max_reviews=0,
-        limit=0, response_format="json")))
+        language="all", purchase_type="steam", limit=0,
+        response_format="json")))
     d = json.loads(out)
     assert d["recent"]["reviews_counted"] == 3
     assert d["recent"]["sampled"] is False
@@ -1569,6 +1603,36 @@ def test_app_reviews_recent_window_can_remove_scan_cap(monkeypatch):
     assert [c.get("cursor") for c in calls if c.get("filter") == "recent"] == [
         "*", "page-2"
     ]
+
+
+def test_app_reviews_recent_partial_failure_preserves_progress(monkeypatch):
+    import time
+
+    now = int(time.time())
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if params.get("filter") == "all":
+            return {"success": 1, "reviews": [], "query_summary": {
+                "review_score_desc": "Positive", "total_reviews": 1,
+                "total_positive": 1, "total_negative": 0}}
+        if params.get("cursor") == "*":
+            return {"success": 1, "cursor": "page-2", "reviews": [{
+                "recommendationid": "1", "voted_up": True,
+                "timestamp_created": now - 10,
+            }]}
+        raise S.httpx2.TimeoutException("boom")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", recent_max_reviews=0,
+        language="all", purchase_type="steam", limit=0,
+        response_format="json")))
+    recent = json.loads(out)["recent"]
+    assert recent["reviews_counted"] == 1
+    assert recent["partial"] is True and recent["sampled"] is True
+    assert recent["stop_reason"] == "request_error"
+    assert recent["next_cursor"] == "page-2"
+    assert "timed out" in recent["error"]
 
 
 def test_review_batch_exposes_full_text_and_cursor(monkeypatch):
@@ -1609,6 +1673,31 @@ def test_review_batch_exposes_full_text_and_cursor(monkeypatch):
     assert d["reviews"][0]["review_truncated"] is False
     assert d["reviews"][0]["author"]["playtime_at_review_hours"] == 1.5
     assert d["reviews"][0]["author"]["playtime_last_two_weeks_hours"] is None
+    assert "steamid" not in d["reviews"][0]["author"]
+    assert d["content_trust"]["level"] == "untrusted_user_generated_content"
+
+
+def test_review_batch_sanitizes_hidden_controls_and_author_id_is_opt_in(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "cursor": "end", "query_summary": {}, "reviews": [{
+            "recommendationid": "1", "voted_up": False,
+            "review": "visible\u200btext\u202ehidden", "developer_response": "\x00reply",
+            "author": {"steamid": "76561197960287930"},
+        }]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    default = json.loads(run(S.steam_get_app_review_batch(S.ReviewBatchInput(
+        appid=1, response_format="json"))))
+    review = default["reviews"][0]
+    assert review["review"] == "visibletexthidden"
+    assert review["review_sanitized"] is True
+    assert review["removed_review_control_chars"] == 2
+    assert review["developer_response"] == "reply"
+    assert "steamid" not in review["author"]
+
+    opted_in = json.loads(run(S.steam_get_app_review_batch(S.ReviewBatchInput(
+        appid=1, include_author_id=True, response_format="json"))))
+    assert opted_in["reviews"][0]["author"]["steamid"] == "76561197960287930"
 
 
 def test_review_analysis_streams_pages_and_bounds_samples(monkeypatch):
@@ -1642,7 +1731,8 @@ def test_review_analysis_streams_pages_and_bounds_samples(monkeypatch):
                     review(1, True, 1700000300, "english", 2, 0.2,
                            early_access=True, at_review=30),
                     review(2, False, 1700000200, "koreana", 9, 0.9,
-                           received_for_free=True, developer_response="Fixed"),
+                           steam_purchase=False, received_for_free=True,
+                           developer_response="Fixed"),
                 ],
             }
         return {
@@ -1668,6 +1758,18 @@ def test_review_analysis_streams_pages_and_bounds_samples(monkeypatch):
     assert d["languages"][0]["language"] == "english"
     assert len(d["representative_reviews"]["recent"]["positive"]) == 1
     assert len(d["representative_reviews"]["helpful"]["negative"]) == 1
+    purchase_rows = {
+        row["segment"]: row
+        for row in d["sentiment_by_segment"]["purchase_source"]
+    }
+    assert purchase_rows["steam_purchase"]["positive_pct"] == 100.0
+    assert purchase_rows["non_steam_purchase"]["positive_pct"] == 0.0
+    playtime_rows = {
+        row["segment"]: row
+        for row in d["sentiment_by_segment"]["playtime_at_review"]
+    }
+    assert playtime_rows["<1h"]["positive_pct"] == 100.0
+    assert playtime_rows["1-5h"]["positive_pct"] == 50.0
     assert calls[0]["cursor"] == "*"
     assert calls[1]["num_per_page"] == 1  # fetch exactly the remaining budget
 
@@ -1699,6 +1801,52 @@ def test_review_analysis_zero_limit_reaches_api_exhaustion(monkeypatch):
     assert d["scan"]["complete_for_requested_scope"] is True
     assert d["scan"]["sampled"] is False
     assert d["scan"]["stop_reason"] == "api_exhausted"
+
+
+def test_review_analysis_request_error_returns_resumable_partial_result(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        if params["cursor"] == "*":
+            return {"success": 1, "cursor": "page-2", "query_summary": {
+                "total_positive": 1, "total_negative": 1, "total_reviews": 2},
+                "reviews": [
+                    {"recommendationid": "1", "voted_up": True,
+                     "timestamp_created": 1700000200, "review": "one"},
+                    {"recommendationid": "2", "voted_up": False,
+                     "timestamp_created": 1700000100, "review": "two"},
+                ]}
+        raise S.httpx2.TimeoutException("boom")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(
+        appid=1, max_reviews=0, sample_per_bucket=1,
+        response_format="json")))
+    d = json.loads(out)
+    assert d["scan"]["reviews_scanned"] == 2
+    assert d["scan"]["complete_for_requested_scope"] is False
+    assert d["scan"]["partial"] is True and d["scan"]["sampled"] is True
+    assert d["scan"]["stop_reason"] == "request_error"
+    assert d["scan"]["next_cursor"] == "page-2"
+    assert "timed out" in d["scan"]["error"]
+    assert d["sentiment"]["positive_pct"] == 50.0
+
+
+def test_review_analysis_page_budget_returns_continuation(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "cursor": "page-2", "query_summary": {
+            "total_positive": 1, "total_negative": 0, "total_reviews": 10},
+            "reviews": [{"recommendationid": "1", "voted_up": True,
+                         "timestamp_created": 1700000200, "review": "one"}]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(
+        appid=1, max_reviews=0, max_pages=1, sample_per_bucket=0,
+        response_format="json")))
+    scan = json.loads(out)["scan"]
+    assert scan["reviews_scanned"] == 1
+    assert scan["pages_fetched"] == 1
+    assert scan["stop_reason"] == "max_pages"
+    assert scan["next_cursor"] == "page-2"
+    assert scan["partial"] is True and scan["sampled"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -1847,15 +1995,19 @@ def test_tools_registered():
     # not _fmt_review's raw-dict signature
     schema = json.dumps(_wire(by_name["steam_get_app_reviews"])["inputSchema"])
     assert "appid" in schema and "review_filter" in schema
+    assert "purchase_type" in schema and "recent_max_reviews" in schema
     batch_schema = json.dumps(
         _wire(by_name["steam_get_app_review_batch"])["inputSchema"]
     )
     assert "cursor" in batch_schema and "page_size" in batch_schema
+    assert "include_author_id" in batch_schema
     analysis_schema = json.dumps(
         _wire(by_name["steam_analyze_app_reviews"])["inputSchema"]
     )
     assert "cursor" in analysis_schema and "max_reviews" in analysis_schema
     assert "day_range" in analysis_schema
+    assert "max_pages" in analysis_schema and "max_seconds" in analysis_schema
+    assert "include_author_id" in analysis_schema
 
 
 # --------------------------------------------------------------------------- #

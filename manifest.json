@@ -127,7 +127,7 @@
     },
     {
       "name": "steam_should_i_buy",
-      "description": "Buying brief: price, lifetime + recent reviews, tags, Metacritic, and taste match"
+      "description": "Buying brief: price, official Steam score vs all readable feedback, recent trend, tags, Metacritic, and taste match"
     },
     {
       "name": "steam_recommend",
@@ -163,15 +163,15 @@
     },
     {
       "name": "steam_get_app_reviews",
-      "description": "Review score and samples, lifetime or last-N-days; exact recent scans can remove the default cap"
+      "description": "Official all-language Steam-purchase score plus a separately filtered feedback corpus, samples, and recent scans"
     },
     {
       "name": "steam_get_app_review_batch",
-      "description": "A cursor page of up to 100 full reviews for unlimited corpus traversal"
+      "description": "A cursor page of up to 100 sanitized full reviews; reviewer SteamIDs are opt-in"
     },
     {
       "name": "steam_analyze_app_reviews",
-      "description": "Resumable large-corpus review analysis: sentiment timeline, reviewer signals, playtime, languages, and representative text"
+      "description": "Resumable large-corpus review analysis with segment sentiment and partial-progress preservation on budgets/errors"
     },
     {
       "name": "steam_get_featured_specials",

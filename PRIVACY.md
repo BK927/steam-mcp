@@ -20,10 +20,11 @@ Requests may include:
   required to authenticate API calls. It is never transmitted anywhere else.
 - **SteamIDs / vanity names / app IDs** you ask about, passed as request
   parameters to Valve.
-- **Public review data** returned by Valve, which can include review text, the
-  reviewer's public SteamID, playtime, helpfulness votes, purchase/free/early-
-  access flags, and developer responses. Review pages are processed in memory and
-  are not persisted by this server.
+- **Public review data** returned by Valve, which can include review text, public
+  reviewer SteamIDs, playtime, helpfulness votes, purchase/free/early-access flags,
+  and developer responses. Review pages are processed in memory and are not
+  persisted. Returned reviewer SteamIDs are omitted by default; callers must
+  explicitly set `include_author_id=true` when an analysis genuinely needs them.
 
 ## What it does NOT do
 
@@ -38,13 +39,16 @@ Requests may include:
 ## Storage, sharing, and retention
 
 - **Storage:** none. The server persists nothing to disk. A small in-memory cache
-  holds only *non-user*, static responses (store/app/tag/news data) and lives only
-  for the running process.
+  may hold public, non-account store/app/tag/news/review-summary responses (including
+  a requested small review sample) and lives only for the running process.
 - **Third-party sharing:** none. Data is exchanged only between your machine and
   Valve's official endpoints; it is never sent to the author or any analytics or
   third-party service.
 - **Retention:** none. Nothing is retained between requests beyond the short-lived
-  in-memory cache above, which is discarded when the process exits.
+  in-memory cache above, which is discarded when the process exits. Large review
+  scans keep aggregate counters and bounded representative samples rather than the
+  complete corpus. Invisible/control characters are removed from returned review
+  and developer-response text.
 - **If the server asks who you are:** when no `STEAM_USER` is configured and your
   client supports elicitation, the server may ask once for your Steam account so
   the "about me" tools have someone to talk about. That answer is held in memory
