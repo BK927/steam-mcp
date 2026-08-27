@@ -11,7 +11,7 @@ description: >-
 
 # Steam
 
-Drives the `steam-mcp` server (read-only Steam Web API + storefront): 37 tools,
+Drives the `steam-mcp` server (read-only Steam Web API + storefront): 39 tools,
 plus 5 prompts and 2 resources.
 
 ## Token-efficient usage
@@ -25,8 +25,9 @@ plus 5 prompts and 2 resources.
   - "co-op night" → `steam_plan_coop_night`.
 - **Leave `response_format` on `markdown`** (the default, compact). Only ask for
   `json` when you actually need to parse fields.
-- **Cap list sizes**: pass a small `limit` and page with `offset`; don't pull a
-  2,000-game library or a whole inventory when you need the top few.
+- **Cap list sizes**: pass a small `limit` and page with `offset`; reviews page
+  with `cursor` / `next_cursor`. Don't pull a 2,000-game library, a whole
+  inventory, or every review when a focused sample answers the question.
 - Resolve a game name to an appid once with `steam_search_apps`, then reuse it.
 
 ## Common workflows
@@ -34,6 +35,12 @@ plus 5 prompts and 2 resources.
 - **Game research** — `steam_get_app_details`, then `steam_get_app_reviews`
   (`review_filter='recent'` for the trend), `steam_get_app_tags`,
   `steam_get_current_players`.
+- **Review intelligence** — `steam_analyze_app_reviews` for thousands/all reviews
+  summarized into quantitative signals plus representative praise/complaints;
+  `steam_get_app_review_batch` when the task needs full text, paging with
+  `next_cursor`. For huge analyses, feed the returned `next_cursor` back as
+  `cursor`; set `max_reviews=0` or `recent_max_reviews=0` only when exact,
+  uncapped traversal is worth the extra requests.
 - **Should I buy it** — `steam_should_i_buy` (pass `steamid` to personalize). Prices
   by region: `steam_get_app_regional_pricing`. An item/skin's value:
   `steam_get_market_price`.

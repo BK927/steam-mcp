@@ -519,6 +519,34 @@ def test_app_reviews_language(monkeypatch):
     assert captured.get("language") == "german"
 
 
+def test_app_review_sentiment_sample_keeps_overall_summary(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if params["review_type"] == "all":
+            return {"success": 1, "reviews": [], "query_summary": {
+                "review_score_desc": "Very Positive", "total_positive": 8,
+                "total_negative": 2, "total_reviews": 10}}
+        return {"success": 1, "reviews": [{
+            "recommendationid": "n1", "voted_up": False,
+            "review": "A representative complaint", "author": {},
+        }], "query_summary": {"total_positive": 0,
+                               "total_negative": 2, "total_reviews": 2}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_type="negative", limit=1, response_format="json")))
+    d = json.loads(out)
+    assert [call["review_type"] for call in calls] == ["all", "negative"]
+    assert calls[0]["num_per_page"] == 0
+    assert calls[1]["num_per_page"] == 1
+    assert d["summary"]["total_positive"] == 8
+    assert d["summary"]["total_negative"] == 2
+    assert d["summary"]["positive_pct"] == 80.0
+    assert d["reviews"][0]["voted_up"] is False
+
+
 # --------------------------------------------------------------------------- #
 # 1.0.0: retry / backoff on transient failures
 # --------------------------------------------------------------------------- #
@@ -1503,6 +1531,176 @@ def test_app_reviews_recent_window(monkeypatch):
     assert d["recent"]["positive"] == 2
 
 
+def test_app_reviews_recent_window_can_remove_scan_cap(monkeypatch):
+    """recent_max_reviews=0 follows cursors until the actual date boundary."""
+    import time
+
+    now = int(time.time())
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if params.get("filter") == "all":
+            return {"success": 1, "query_summary": {
+                "review_score_desc": "Positive", "total_reviews": 4,
+                "total_positive": 3, "total_negative": 1}, "reviews": []}
+        if params.get("cursor") == "*":
+            return {"success": 1, "cursor": "page-2", "reviews": [
+                {"recommendationid": "1", "voted_up": True,
+                 "timestamp_created": now - 10},
+                {"recommendationid": "2", "voted_up": False,
+                 "timestamp_created": now - 20},
+            ]}
+        return {"success": 1, "cursor": "page-3", "reviews": [
+            {"recommendationid": "3", "voted_up": True,
+             "timestamp_created": now - 30},
+            {"recommendationid": "4", "voted_up": True,
+             "timestamp_created": now - 31 * 86400},
+        ]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", recent_max_reviews=0,
+        limit=0, response_format="json")))
+    d = json.loads(out)
+    assert d["recent"]["reviews_counted"] == 3
+    assert d["recent"]["sampled"] is False
+    assert d["recent"]["scan_limit"] == 0
+    assert [c.get("cursor") for c in calls if c.get("filter") == "recent"] == [
+        "*", "page-2"
+    ]
+
+
+def test_review_batch_exposes_full_text_and_cursor(monkeypatch):
+    captured = {}
+    body = "Full review text\nwith a second line."
+
+    async def fake_raw(url, params, cache_ttl=0):
+        captured.update(params)
+        return {
+            "success": 1,
+            "cursor": "next%2Bcursor",
+            "query_summary": {
+                "review_score_desc": "Very Positive", "total_reviews": 123,
+            },
+            "reviews": [{
+                "recommendationid": "99", "language": "english",
+                "review": body, "timestamp_created": 1700000000,
+                "timestamp_updated": 1700000100, "voted_up": True,
+                "votes_up": 7, "votes_funny": 2, "weighted_vote_score": "0.8",
+                "comment_count": 1, "steam_purchase": True,
+                "received_for_free": False, "written_during_early_access": True,
+                "developer_response": "Thanks!", "timestamp_dev_responded": 1700000200,
+                "author": {"steamid": "76561197960287930",
+                           "playtime_at_review": 90, "playtime_forever": 180},
+            }],
+        }
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_app_review_batch(S.ReviewBatchInput(
+        appid=1, include_offtopic_activity=True, response_format="json")))
+    d = json.loads(out)
+    assert captured["num_per_page"] == 100
+    assert captured["filter"] == "recent" and captured["cursor"] == "*"
+    assert captured["filter_offtopic_activity"] == 0
+    assert d["page"]["has_more"] is True
+    assert d["page"]["next_cursor"] == "next%2Bcursor"
+    assert d["reviews"][0]["review"] == body
+    assert d["reviews"][0]["review_truncated"] is False
+    assert d["reviews"][0]["author"]["playtime_at_review_hours"] == 1.5
+    assert d["reviews"][0]["author"]["playtime_last_two_weeks_hours"] is None
+
+
+def test_review_analysis_streams_pages_and_bounds_samples(monkeypatch):
+    calls = []
+
+    def review(rid, voted_up, timestamp, language, votes, weighted, **extra):
+        return {
+            "recommendationid": str(rid), "voted_up": voted_up,
+            "timestamp_created": timestamp, "language": language,
+            "review": f"review {rid}", "votes_up": votes,
+            "weighted_vote_score": str(weighted),
+            "steam_purchase": extra.get("steam_purchase", True),
+            "received_for_free": extra.get("received_for_free", False),
+            "written_during_early_access": extra.get("early_access", False),
+            "primarily_steam_deck": extra.get("deck", False),
+            "developer_response": extra.get("developer_response", ""),
+            "author": {"playtime_at_review": extra.get("at_review", 60),
+                       "playtime_forever": extra.get("forever", 120)},
+        }
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if params["cursor"] == "*":
+            return {
+                "success": 1, "cursor": "page-2",
+                "query_summary": {
+                    "review_score": 8, "review_score_desc": "Very Positive",
+                    "total_positive": 3, "total_negative": 1, "total_reviews": 4,
+                },
+                "reviews": [
+                    review(1, True, 1700000300, "english", 2, 0.2,
+                           early_access=True, at_review=30),
+                    review(2, False, 1700000200, "koreana", 9, 0.9,
+                           received_for_free=True, developer_response="Fixed"),
+                ],
+            }
+        return {
+            "success": 1, "cursor": "page-3",
+            "reviews": [review(3, True, 1700000100, "english", 5, 0.7,
+                               deck=True, forever=600)],
+        }
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(
+        appid=1, max_reviews=3, sample_per_bucket=1,
+        max_text_chars=100, response_format="json")))
+    d = json.loads(out)
+    assert d["scan"]["reviews_scanned"] == 3
+    assert d["scan"]["pages_fetched"] == 2
+    assert d["scan"]["sampled"] is True
+    assert d["scan"]["stop_reason"] == "max_reviews"
+    assert d["scan"]["next_cursor"] == "page-3"
+    assert d["sentiment"] == {"positive": 2, "negative": 1,
+                               "positive_pct": 66.7}
+    assert d["review_characteristics"]["received_for_free"]["count"] == 1
+    assert d["review_characteristics"]["developer_response"]["count"] == 1
+    assert d["languages"][0]["language"] == "english"
+    assert len(d["representative_reviews"]["recent"]["positive"]) == 1
+    assert len(d["representative_reviews"]["helpful"]["negative"]) == 1
+    assert calls[0]["cursor"] == "*"
+    assert calls[1]["num_per_page"] == 1  # fetch exactly the remaining budget
+
+
+def test_review_analysis_zero_limit_reaches_api_exhaustion(monkeypatch):
+    pages = {
+        "resume-here": {"success": 1, "cursor": "page-2", "query_summary": {
+            "total_positive": 1, "total_negative": 1, "total_reviews": 2},
+            "reviews": [{"recommendationid": "1", "voted_up": True,
+                         "timestamp_created": 1700000200, "review": "one"}]},
+        "page-2": {"success": 1, "cursor": "page-3",
+                   "reviews": [{"recommendationid": "2", "voted_up": False,
+                                "timestamp_created": 1700000100, "review": "two"}]},
+        "page-3": {"success": 1, "cursor": "page-3", "reviews": []},
+    }
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return pages[params["cursor"]]
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(
+        appid=1, cursor="resume-here", max_reviews=0,
+        sample_per_bucket=0, response_format="json")))
+    d = json.loads(out)
+    assert d["filters"]["start_cursor"] == "resume-here"
+    assert d["scan"]["overall_corpus_coverage_pct"] is None
+    assert d["scan"]["reviews_scanned"] == 2
+    assert d["scan"]["pages_fetched"] == 3
+    assert d["scan"]["complete_for_requested_scope"] is True
+    assert d["scan"]["sampled"] is False
+    assert d["scan"]["stop_reason"] == "api_exhausted"
+
+
 # --------------------------------------------------------------------------- #
 # 0.7.0: currency formatting, bounded fan-out, DLC, user stats, registration
 # --------------------------------------------------------------------------- #
@@ -1629,6 +1827,8 @@ def test_tools_registered():
     tools = run(S.mcp.list_tools())
     by_name = {t.name: t for t in tools}
     assert "steam_get_app_reviews" in by_name
+    assert "steam_get_app_review_batch" in by_name
+    assert "steam_analyze_app_reviews" in by_name
     assert "steam_get_dlc" in by_name
     assert "steam_get_user_game_stats" in by_name
     assert "steam_get_app_tags" in by_name
@@ -1647,6 +1847,15 @@ def test_tools_registered():
     # not _fmt_review's raw-dict signature
     schema = json.dumps(_wire(by_name["steam_get_app_reviews"])["inputSchema"])
     assert "appid" in schema and "review_filter" in schema
+    batch_schema = json.dumps(
+        _wire(by_name["steam_get_app_review_batch"])["inputSchema"]
+    )
+    assert "cursor" in batch_schema and "page_size" in batch_schema
+    analysis_schema = json.dumps(
+        _wire(by_name["steam_analyze_app_reviews"])["inputSchema"]
+    )
+    assert "cursor" in analysis_schema and "max_reviews" in analysis_schema
+    assert "day_range" in analysis_schema
 
 
 # --------------------------------------------------------------------------- #
@@ -1736,7 +1945,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 37
+    assert len(S.mcp._tool_manager.list_tools()) == 39
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2130,7 +2339,7 @@ def test_readme_key_column_matches_the_code():
 
     readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
+    assert len(rows) == 39, f"parsed {len(rows)} tool rows, expected 39"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"

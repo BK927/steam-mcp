@@ -1,6 +1,6 @@
 # Privacy Policy — Steam MCP
 
-_Last updated: 2026-06-01_
+_Last updated: 2026-08-28_
 
 Steam MCP is a read-only, locally-run Model Context Protocol server. It is not a
 hosted service. This document explains what it does and does not do with data.
@@ -20,6 +20,10 @@ Requests may include:
   required to authenticate API calls. It is never transmitted anywhere else.
 - **SteamIDs / vanity names / app IDs** you ask about, passed as request
   parameters to Valve.
+- **Public review data** returned by Valve, which can include review text, the
+  reviewer's public SteamID, playtime, helpfulness votes, purchase/free/early-
+  access flags, and developer responses. Review pages are processed in memory and
+  are not persisted by this server.
 
 ## What it does NOT do
 
@@ -53,7 +57,8 @@ Requests may include:
 
 The server can only read data that Valve exposes. Friends lists, owned games, and
 achievements are returned only when the target Steam profile's privacy settings
-make them **Public**. The server cannot access private profile data.
+make them **Public**. Store reviews and their accompanying reviewer metadata are
+public storefront data. The server cannot access private profile data.
 
 ## Your responsibilities
 

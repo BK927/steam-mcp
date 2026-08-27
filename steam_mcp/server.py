@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import heapq
 import inspect
 import json
 import logging
@@ -28,7 +29,9 @@ import os
 import random
 import re
 import time
+from collections import Counter, defaultdict
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlsplit
@@ -56,7 +59,7 @@ except ImportError:  # pragma: no cover - depends on installed SDK major
 # Server + constants
 # ---------------------------------------------------------------------------
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 # Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
 # tool/prompt/template listings are static for the life of the process (~58 KB of
@@ -135,11 +138,13 @@ RATE_LIMITS = {
     "steamcommunity.com": (2.0, 5),
 }
 
-# Recent-reviews computation: Steam's query_summary is always lifetime, so the
-# recent (last-N-days) score is computed by paginating the newest reviews. These
-# bound that work so a hugely-reviewed game can't trigger unbounded requests.
-RECENT_PAGE_SIZE = 100
-MAX_RECENT_PAGES = 6  # up to 600 most-recent reviews considered
+# Steam's review endpoint returns at most 100 reviews per HTTP request, but its
+# cursor can be followed indefinitely. Keep the per-request ceiling separate from
+# our *default* recent-score scan budget: callers may set that budget to 0 for an
+# exact, uncapped traversal of the requested time window.
+REVIEW_PAGE_SIZE = 100
+DEFAULT_RECENT_SCAN_LIMIT = 600
+DEFAULT_REVIEW_ANALYSIS_LIMIT = 5_000
 
 # Steam persona (online) states -> human-readable label.
 PERSONA_STATES = {
@@ -309,6 +314,8 @@ KEYLESS_TOOLS = frozenset({
     "steam_get_app_details",
     "steam_get_app_news",
     "steam_get_app_regional_pricing",
+    "steam_analyze_app_reviews",
+    "steam_get_app_review_batch",
     "steam_get_app_reviews",
     "steam_get_app_tags",
     "steam_get_current_players",
@@ -1161,8 +1168,8 @@ class AppReviewsInput(BaseModel):
     review_filter: str = Field(
         default="all",
         description="Scoring window: 'all' returns Steam's lifetime summary; "
-        "'recent' additionally computes the last-N-days score (the store page's "
-        "'Recent Reviews' box) by tallying the newest reviews. Default 'all'.",
+        "'recent' additionally computes the last-N-days score by tallying newest "
+        "reviews. Default 'all'.",
     )
     day_range: int = Field(
         default=30,
@@ -1171,6 +1178,13 @@ class AppReviewsInput(BaseModel):
         ge=1,
         le=365,
     )
+    recent_max_reviews: int = Field(
+        default=DEFAULT_RECENT_SCAN_LIMIT,
+        description="Maximum reviews to scan while computing the recent score. "
+        "Set 0 for an exact uncapped traversal of the whole day_range window. "
+        "The default 600 keeps ordinary calls fast on extremely popular games.",
+        ge=0,
+    )
     review_type: str = Field(
         default="all",
         description="Which reviews to sample for excerpts: 'all', 'positive', "
@@ -1178,10 +1192,11 @@ class AppReviewsInput(BaseModel):
     )
     limit: int = Field(
         default=5,
-        description="Number of individual review excerpts to include (0-20). The "
-        "score summary is always returned.",
+        description="Number of individual review excerpts to include (0-100). "
+        "For unlimited traversal with full text, use steam_get_app_review_batch "
+        "and follow its next_cursor.",
         ge=0,
-        le=20,
+        le=REVIEW_PAGE_SIZE,
     )
     country_code: str = Field(default="us", min_length=2, max_length=2)
     language: str = Field(
@@ -1206,6 +1221,163 @@ class AppReviewsInput(BaseModel):
         v = v.lower().strip()
         if v not in {"all", "recent"}:
             raise ValueError("review_filter must be 'all' or 'recent'")
+        return v
+
+
+class ReviewBatchInput(BaseModel):
+    """One cursor page of raw reviews; repeat with next_cursor for any corpus size."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    cursor: str = Field(
+        default="*",
+        description="Cursor returned by the preceding call. Use '*' for page one.",
+        min_length=1,
+        max_length=8192,
+    )
+    sort_by: str = Field(
+        default="recent",
+        description="Stable traversal order: 'recent' (creation time) or 'updated' "
+        "(last edit time).",
+    )
+    page_size: int = Field(
+        default=REVIEW_PAGE_SIZE,
+        description="Reviews in this page (1-100, Steam's per-request maximum).",
+        ge=1,
+        le=REVIEW_PAGE_SIZE,
+    )
+    review_type: str = Field(
+        default="all",
+        description="'all', 'positive', or 'negative'.",
+    )
+    purchase_type: str = Field(
+        default="all",
+        description="'all', 'steam', or 'non_steam_purchase'.",
+    )
+    language: str = Field(
+        default="all",
+        description="Steam review language, or 'all' for the global corpus.",
+        min_length=2,
+        max_length=32,
+    )
+    include_offtopic_activity: bool = Field(
+        default=False,
+        description="Include reviews Steam classified as off-topic review-bomb "
+        "activity. False follows Steam's default filtering.",
+    )
+    max_text_chars: int = Field(
+        default=0,
+        description="Maximum characters per review/developer response. 0 returns "
+        "the full text; use a positive value to keep tool responses compact.",
+        ge=0,
+        le=100_000,
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("sort_by")
+    @classmethod
+    def _check_sort(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"recent", "updated"}:
+            raise ValueError("sort_by must be 'recent' or 'updated'")
+        return v
+
+    @field_validator("review_type")
+    @classmethod
+    def _check_review_type(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"all", "positive", "negative"}:
+            raise ValueError("review_type must be 'all', 'positive', or 'negative'")
+        return v
+
+    @field_validator("purchase_type")
+    @classmethod
+    def _check_purchase_type(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"all", "steam", "non_steam_purchase"}:
+            raise ValueError(
+                "purchase_type must be 'all', 'steam', or 'non_steam_purchase'"
+            )
+        return v
+
+
+class ReviewAnalysisInput(BaseModel):
+    """Large-corpus quantitative review scan with bounded representative text."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    cursor: str = Field(
+        default="*",
+        description="Starting cursor. Use '*' for the newest reviews, or the "
+        "next_cursor returned by a preceding analysis/batch call to resume a huge "
+        "corpus without one long-running request.",
+        min_length=1,
+        max_length=8192,
+    )
+    max_reviews: int = Field(
+        default=DEFAULT_REVIEW_ANALYSIS_LIMIT,
+        description="Maximum reviews to aggregate from cursor. Set 0 to follow "
+        "the cursor until the API is exhausted or day_range is fully covered. The "
+        "scan streams aggregates, so review text is not retained wholesale.",
+        ge=0,
+    )
+    day_range: Optional[int] = Field(
+        default=None,
+        description="Optional 1-365 day window. The scan stops exactly when it "
+        "crosses this creation-time boundary.",
+        ge=1,
+        le=365,
+    )
+    review_type: str = Field(default="all", description="'all', 'positive', or 'negative'.")
+    purchase_type: str = Field(
+        default="all", description="'all', 'steam', or 'non_steam_purchase'."
+    )
+    language: str = Field(
+        default="all",
+        description="Steam review language, or 'all' for the global corpus.",
+        min_length=2,
+        max_length=32,
+    )
+    include_offtopic_activity: bool = Field(
+        default=False,
+        description="Include reviews Steam classified as off-topic activity.",
+    )
+    sample_per_bucket: int = Field(
+        default=4,
+        description="Representative reviews retained for each of four buckets: "
+        "recent/helpful × positive/negative (0-25).",
+        ge=0,
+        le=25,
+    )
+    max_text_chars: int = Field(
+        default=1600,
+        description="Maximum characters in each representative review. 0 keeps "
+        "full text.",
+        ge=0,
+        le=100_000,
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("review_type")
+    @classmethod
+    def _check_review_type(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"all", "positive", "negative"}:
+            raise ValueError("review_type must be 'all', 'positive', or 'negative'")
+        return v
+
+    @field_validator("purchase_type")
+    @classmethod
+    def _check_purchase_type(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"all", "steam", "non_steam_purchase"}:
+            raise ValueError(
+                "purchase_type must be 'all', 'steam', or 'non_steam_purchase'"
+            )
         return v
 
 
@@ -3108,52 +3280,279 @@ def _fmt_review(r: dict) -> dict:
     }
 
 
+def _clip_text(value: Any, max_chars: int) -> tuple[str, bool]:
+    """Return normalized text and whether an explicit character cap truncated it."""
+    text = str(value or "").strip()
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "…", True
+    return text, False
+
+
+def _iso_utc(timestamp: Any) -> Optional[str]:
+    """Render a Unix timestamp as stable UTC ISO-8601, or None for bad input."""
+    try:
+        return datetime.fromtimestamp(int(timestamp), timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _optional_hours(minutes: Any) -> Optional[float]:
+    """Convert optional Steam minutes to hours without turning missing into 0.0."""
+    if minutes is None:
+        return None
+    try:
+        return _minutes_to_hours(int(minutes))
+    except (TypeError, ValueError):
+        return None
+
+
+def _full_review(r: dict, max_text_chars: int = 0) -> dict:
+    """Normalize the complete Steam review payload for corpus traversal/analysis."""
+    author = r.get("author") or {}
+    review, review_truncated = _clip_text(r.get("review"), max_text_chars)
+    dev_response, dev_response_truncated = _clip_text(
+        r.get("developer_response"), max_text_chars
+    )
+    return {
+        "recommendationid": r.get("recommendationid"),
+        "language": r.get("language"),
+        "review": review,
+        "review_truncated": review_truncated,
+        "timestamp_created": r.get("timestamp_created"),
+        "created_at": _iso_utc(r.get("timestamp_created")),
+        "timestamp_updated": r.get("timestamp_updated"),
+        "updated_at": _iso_utc(r.get("timestamp_updated")),
+        "voted_up": r.get("voted_up"),
+        "votes_up": r.get("votes_up", 0),
+        "votes_funny": r.get("votes_funny", 0),
+        "weighted_vote_score": r.get("weighted_vote_score"),
+        "comment_count": r.get("comment_count", 0),
+        "steam_purchase": r.get("steam_purchase"),
+        "received_for_free": r.get("received_for_free"),
+        "written_during_early_access": r.get("written_during_early_access"),
+        "primarily_steam_deck": r.get("primarily_steam_deck"),
+        "developer_response": dev_response or None,
+        "developer_response_truncated": dev_response_truncated,
+        "timestamp_dev_responded": r.get("timestamp_dev_responded"),
+        "dev_responded_at": _iso_utc(r.get("timestamp_dev_responded")),
+        "author": {
+            "steamid": author.get("steamid"),
+            "games_owned": author.get("num_games_owned"),
+            "reviews_written": author.get("num_reviews"),
+            "playtime_forever_hours": _optional_hours(
+                author.get("playtime_forever")
+            ),
+            "playtime_last_two_weeks_hours": _optional_hours(
+                author.get("playtime_last_two_weeks")
+            ),
+            "playtime_at_review_hours": _optional_hours(
+                author.get("playtime_at_review")
+            ),
+            "deck_playtime_at_review_hours": _optional_hours(
+                author.get("deck_playtime_at_review")
+            ),
+            "last_played": author.get("last_played"),
+            "last_played_at": _iso_utc(author.get("last_played")),
+        },
+    }
+
+
+def _review_request_params(
+    *,
+    cursor: str,
+    sort_by: str,
+    language: str,
+    review_type: str,
+    purchase_type: str,
+    page_size: int,
+    cc: str,
+    include_offtopic_activity: bool = False,
+) -> dict[str, Any]:
+    """Build one official Store Reviews API request without inventing a total cap."""
+    params: dict[str, Any] = {
+        "json": 1,
+        "filter": sort_by,
+        "language": language,
+        "review_type": review_type,
+        "purchase_type": purchase_type,
+        "num_per_page": min(max(page_size, 1), REVIEW_PAGE_SIZE),
+        "cc": cc,
+        "cursor": cursor,
+    }
+    if include_offtopic_activity:
+        # Steam filters review-bomb/off-topic activity by default; 0 opts it back in.
+        params["filter_offtopic_activity"] = 0
+    return params
+
+
+async def _review_page(
+    appid: int,
+    *,
+    cursor: str = "*",
+    sort_by: str = "recent",
+    language: str = "all",
+    review_type: str = "all",
+    purchase_type: str = "all",
+    page_size: int = REVIEW_PAGE_SIZE,
+    cc: str = "us",
+    include_offtopic_activity: bool = False,
+) -> dict:
+    """Fetch one cursor page from Steam's public review-dump endpoint."""
+    data = await _raw_get(
+        f"https://store.steampowered.com/appreviews/{appid}",
+        _review_request_params(
+            cursor=cursor,
+            sort_by=sort_by,
+            language=language,
+            review_type=review_type,
+            purchase_type=purchase_type,
+            page_size=page_size,
+            cc=cc,
+            include_offtopic_activity=include_offtopic_activity,
+        ),
+    )
+    return data if isinstance(data, dict) else {}
+
+
+def _pct(numerator: int, denominator: int) -> float:
+    return round(100.0 * numerator / denominator, 1) if denominator else 0.0
+
+
+def _playtime_bucket(minutes: Any) -> str:
+    try:
+        value = max(0, int(minutes or 0))
+    except (TypeError, ValueError):
+        value = 0
+    if value < 60:
+        return "<1h"
+    if value < 300:
+        return "1-5h"
+    if value < 1_200:
+        return "5-20h"
+    if value < 6_000:
+        return "20-100h"
+    if value < 30_000:
+        return "100-500h"
+    return "500h+"
+
+
+def _timeline_granularity(day_range: Optional[int]) -> str:
+    if day_range is not None and day_range <= 45:
+        return "day"
+    if day_range is not None and day_range <= 180:
+        return "week"
+    return "month"
+
+
+def _timeline_key(timestamp: Any, granularity: str) -> Optional[str]:
+    try:
+        dt = datetime.fromtimestamp(int(timestamp), timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    if granularity == "day":
+        return dt.strftime("%Y-%m-%d")
+    if granularity == "week":
+        year, week, _ = dt.isocalendar()
+        return f"{year}-W{week:02d}"
+    return dt.strftime("%Y-%m")
+
+
+def _keep_helpful_review(
+    heap: list[tuple[float, int, int, dict]],
+    review: dict,
+    limit: int,
+    sequence: int,
+) -> None:
+    """Keep only the N strongest helpfulness candidates in O(N log limit)."""
+    if limit <= 0:
+        return
+    try:
+        weighted = float(review.get("weighted_vote_score") or 0.0)
+    except (TypeError, ValueError):
+        weighted = 0.0
+    try:
+        votes = int(review.get("votes_up") or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    item = (weighted, votes, sequence, review)
+    if len(heap) < limit:
+        heapq.heappush(heap, item)
+    elif item[:3] > heap[0][:3]:
+        heapq.heapreplace(heap, item)
+
+
 async def _collect_recent_reviews(
-    appid: int, day_range: int, cc: str, language: str = "english"
+    appid: int,
+    day_range: int,
+    cc: str,
+    language: str = "english",
+    max_reviews: int = DEFAULT_RECENT_SCAN_LIMIT,
 ) -> tuple[list[dict], bool]:
-    """Paginate the newest reviews (filter=recent) within the last `day_range` days.
+    """Collect newest reviews inside a date window, following cursors as needed.
 
-    Steam's query_summary is always lifetime, so the recent score must be tallied
-    from individual reviews. Returns (reviews_in_window, capped) where `capped` is
-    True if the page budget was exhausted before reaching the window's edge (i.e.
-    there may be more recent reviews than were counted).
+    Returns ``(reviews_in_window, sampled)``. ``sampled`` is true only when a
+    positive ``max_reviews`` budget stopped the scan before the date boundary.
+    Passing ``max_reviews=0`` removes the application-level cap and traverses the
+    complete window (subject only to Steam eventually ending the cursor stream).
     """
-    import time
-
     cutoff = time.time() - day_range * 86400
     collected: list[dict] = []
     cursor = "*"
-    seen: set[str] = set()
-    for _ in range(MAX_RECENT_PAGES):
-        data = await _raw_get(
-            f"https://store.steampowered.com/appreviews/{appid}",
-            {
-                "json": 1,
-                "filter": "recent",
-                "language": language,
-                "review_type": "all",
-                "purchase_type": "all",
-                "num_per_page": RECENT_PAGE_SIZE,
-                "cc": cc,
-                "cursor": cursor,
-            },
+    seen_cursors: set[str] = {cursor}
+    seen_reviews: set[str] = set()
+
+    while True:
+        remaining = max_reviews - len(collected) if max_reviews > 0 else REVIEW_PAGE_SIZE
+        if max_reviews > 0 and remaining <= 0:
+            return collected, True
+        page_size = min(REVIEW_PAGE_SIZE, remaining) if max_reviews > 0 else REVIEW_PAGE_SIZE
+        data = await _review_page(
+            appid,
+            cursor=cursor,
+            sort_by="recent",
+            language=language,
+            review_type="all",
+            purchase_type="all",
+            page_size=page_size,
+            cc=cc,
         )
         if data.get("success") != 1:
-            return collected, False
-        revs = data.get("reviews", [])
+            raise SteamApiError(
+                f"Steam returned no usable recent-review page for app {appid}."
+            )
+        revs = data.get("reviews") or []
         if not revs:
             return collected, False
+
         for r in revs:
-            if (r.get("timestamp_created") or 0) >= cutoff:
-                collected.append(r)
-            else:
-                return collected, False  # reached the window edge: fully covered
+            try:
+                timestamp = int(r.get("timestamp_created") or 0)
+            except (TypeError, ValueError):
+                timestamp = 0
+            if timestamp < cutoff:
+                return collected, False  # fully covered: crossed the window edge
+            recommendationid = str(r.get("recommendationid") or "")
+            if recommendationid and recommendationid in seen_reviews:
+                continue
+            if recommendationid:
+                seen_reviews.add(recommendationid)
+            collected.append(r)
+            if max_reviews > 0 and len(collected) >= max_reviews:
+                nxt = data.get("cursor")
+                # A distinct next cursor means at least another API page may exist;
+                # because this page was requested at exactly the remaining budget,
+                # no in-page reviews were silently skipped.
+                return collected, bool(nxt and nxt != cursor)
+
         nxt = data.get("cursor")
-        if not nxt or nxt in seen:
+        if not nxt:
             return collected, False
-        seen.add(nxt)
+        if nxt in seen_cursors:
+            return collected, True
+        seen_cursors.add(nxt)
         cursor = nxt
-    return collected, True  # exhausted page budget without reaching the edge
 
 
 @mcp.tool(
@@ -3172,13 +3571,14 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
     Answers "is X any good", "what's the rating of X", and "how are the RECENT
     reviews for X". Always returns Steam's lifetime verdict (e.g. 'Very Positive').
     With review_filter='recent', it ALSO computes the last-N-days positive % by
-    tallying the newest reviews — Steam's API has no recent-summary field, so this
-    is derived from individual reviews and is marked 'sampled' if the game has more
-    recent reviews than the page budget (~600). No API key required.
+    tallying newest reviews. ``recent_max_reviews`` is a tunable speed budget; set
+    it to 0 to remove the old fixed ~600-review ceiling and cover the whole window.
+    For full review text at arbitrary corpus size, page through
+    ``steam_get_app_review_batch``. No API key required.
 
     Args:
         params (AppReviewsInput): appid, review_filter ('all'|'recent'),
-            day_range (window for 'recent'), review_type (excerpt sampling),
+            day_range and recent_max_reviews (recent score scan), review_type,
             limit (number of excerpts), country_code.
 
     Returns:
@@ -3196,9 +3596,16 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 "json": 1,
                 "filter": "all",
                 "language": params.language,
-                "review_type": params.review_type,
+                "review_type": "all",
                 "purchase_type": "all",
-                "num_per_page": params.limit if params.review_filter == "all" else 0,
+                "num_per_page": (
+                    params.limit
+                    if (
+                        params.review_filter == "all"
+                        and params.review_type == "all"
+                    )
+                    else 0
+                ),
                 "cc": params.country_code,
             },
             cache_ttl=CACHE_TTL_REVIEWS,
@@ -3214,7 +3621,11 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
         recent = None
         if params.review_filter == "recent":
             window, capped = await _collect_recent_reviews(
-                params.appid, params.day_range, params.country_code, params.language
+                params.appid,
+                params.day_range,
+                params.country_code,
+                params.language,
+                params.recent_max_reviews,
             )
             rpos = sum(1 for r in window if r.get("voted_up"))
             rneg = len(window) - rpos
@@ -3226,10 +3637,31 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 "negative": rneg,
                 "positive_pct": rpct,
                 "sampled": capped,
+                "scan_limit": params.recent_max_reviews,
             }
             sample_src = window
         else:
-            sample_src = base.get("reviews", [])
+            if params.review_type == "all" or params.limit == 0:
+                sample_src = base.get("reviews", [])
+            else:
+                sample_page = await _raw_get(
+                    f"https://store.steampowered.com/appreviews/{params.appid}",
+                    {
+                        "json": 1,
+                        "filter": "all",
+                        "language": params.language,
+                        "review_type": params.review_type,
+                        "purchase_type": "all",
+                        "num_per_page": params.limit,
+                        "cc": params.country_code,
+                    },
+                    cache_ttl=CACHE_TTL_REVIEWS,
+                )
+                sample_src = (
+                    sample_page.get("reviews", [])
+                    if sample_page.get("success") == 1
+                    else []
+                )
 
         if params.review_type == "positive":
             sample_src = [r for r in sample_src if r.get("voted_up")]
@@ -3259,7 +3691,12 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
             f"{pos:,}/{pos + neg:,} ({pos_pct}%)",
         ]
         if recent is not None:
-            note = " (sampled — capped)" if recent["sampled"] else ""
+            note = (
+                f" (sampled at {recent['scan_limit']:,}; set recent_max_reviews=0 "
+                f"for exact coverage)"
+                if recent["sampled"]
+                else ""
+            )
             lines.append(
                 f"- **Recent (last {recent['day_range']}d)**: "
                 f"{recent['positive_pct']}% of {recent['reviews_counted']} "
@@ -3275,6 +3712,550 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                     f"- {thumb} ({r['playtime_hours']}h played, "
                     f"{r['votes_up']} found helpful): {r['excerpt']}"
                 )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="steam_get_app_review_batch",
+    annotations={
+        "title": "Get a Cursor Page of Full Steam Reviews",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_app_review_batch(params: ReviewBatchInput) -> str:
+    """Fetch up to 100 full reviews and a cursor for unlimited traversal.
+
+    This is the corpus-access tool, not a score summary. Steam itself caps one HTTP
+    response at 100 reviews, so call once with ``cursor='*'`` and pass the returned
+    ``next_cursor`` into subsequent calls. There is no application-level total
+    review cap: paging may continue until ``has_more`` is false. ``recent`` and
+    ``updated`` are stable traversal orders; optional filters cover sentiment,
+    purchase source, language, and off-topic/review-bomb activity. No key required.
+    """
+    try:
+        data = await _review_page(
+            params.appid,
+            cursor=params.cursor,
+            sort_by=params.sort_by,
+            language=params.language,
+            review_type=params.review_type,
+            purchase_type=params.purchase_type,
+            page_size=params.page_size,
+            cc=params.country_code,
+            include_offtopic_activity=params.include_offtopic_activity,
+        )
+        if data.get("success") != 1:
+            return f"No review data available for app {params.appid}."
+
+        raw_reviews = data.get("reviews") or []
+        next_cursor = data.get("cursor")
+        has_more = bool(raw_reviews and next_cursor and next_cursor != params.cursor)
+        reviews = [_full_review(r, params.max_text_chars) for r in raw_reviews]
+        summary = data.get("query_summary") or None
+        out = {
+            "appid": params.appid,
+            "filters": {
+                "sort_by": params.sort_by,
+                "language": params.language,
+                "review_type": params.review_type,
+                "purchase_type": params.purchase_type,
+                "include_offtopic_activity": params.include_offtopic_activity,
+            },
+            "page": {
+                "cursor": params.cursor,
+                "next_cursor": next_cursor if has_more else None,
+                "has_more": has_more,
+                "requested": params.page_size,
+                "returned": len(reviews),
+            },
+            "query_summary": summary,
+            "reviews": reviews,
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(out)
+
+        lines = [
+            f"# Review batch for app {params.appid}",
+            f"- **Returned**: {len(reviews):,}/{params.page_size:,}",
+            f"- **Order / filters**: {params.sort_by}; language={params.language}; "
+            f"type={params.review_type}; purchase={params.purchase_type}",
+        ]
+        if summary:
+            lines.append(
+                f"- **Matching corpus**: {summary.get('total_reviews', 0):,} reviews; "
+                f"{summary.get('review_score_desc', 'n/a')}"
+            )
+        if has_more:
+            lines.append(f"- **next_cursor**: `{next_cursor}`")
+        else:
+            lines.append("- **End of corpus**: no further cursor page")
+
+        for index, review in enumerate(reviews, 1):
+            thumb = "👍" if review["voted_up"] else "👎"
+            author = review["author"]
+            lines.extend(
+                [
+                    "",
+                    f"## {index}. {thumb} review {review['recommendationid'] or ''}".rstrip(),
+                    f"- Created: {review['created_at'] or review['timestamp_created']} | "
+                    f"Language: {review['language'] or 'unknown'} | "
+                    f"Helpful: {review['votes_up']}",
+                    f"- Playtime: {author['playtime_at_review_hours']}h at review; "
+                    f"{author['playtime_forever_hours']}h total",
+                ]
+            )
+            flags = []
+            if review["received_for_free"]:
+                flags.append("received free")
+            if review["written_during_early_access"]:
+                flags.append("early access")
+            if review["primarily_steam_deck"]:
+                flags.append("primarily Steam Deck")
+            if flags:
+                lines.append(f"- Flags: {', '.join(flags)}")
+            body = review["review"] or "(no written text)"
+            lines.append("")
+            lines.extend(f"> {line}" for line in body.splitlines() or [body])
+            if review["developer_response"]:
+                lines.append("")
+                lines.append("**Developer response**")
+                lines.extend(
+                    f"> {line}" for line in review["developer_response"].splitlines()
+                )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="steam_analyze_app_reviews",
+    annotations={
+        "title": "Analyze a Large Steam Review Corpus",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_analyze_app_reviews(params: ReviewAnalysisInput) -> str:
+    """Stream thousands (or all) reviews into quantitative analysis + samples.
+
+    Follows Steam's review cursor in newest-first order and aggregates sentiment,
+    time trend, languages, purchase/free/early-access/Deck signals, developer reply
+    rate, review length, and reviewer playtime distributions without retaining the
+    whole corpus in memory. It keeps bounded recent/helpful positive and negative
+    text samples so an LLM can inspect concrete praise and complaints. Set
+    ``max_reviews=0`` for no application-level cap; optionally set ``day_range`` to
+    stop exactly at a recent-window boundary. For very large corpora, pass the
+    returned ``next_cursor`` back as ``cursor`` and analyze in resumable chunks.
+    No API key required.
+    """
+    try:
+        cutoff = (
+            time.time() - params.day_range * 86400
+            if params.day_range is not None
+            else None
+        )
+        cursor = params.cursor
+        seen_cursors: set[str] = {cursor}
+        pages_fetched = 0
+        reviews_scanned = 0
+        positives = 0
+        negatives = 0
+        newest_timestamp: Optional[int] = None
+        oldest_timestamp: Optional[int] = None
+        query_summary: dict[str, Any] = {}
+        next_cursor: Optional[str] = None
+        stop_reason = "api_exhausted"
+
+        languages: Counter[str] = Counter()
+        traits: Counter[str] = Counter()
+        text_chars = 0
+        text_reviews = 0
+        playtime_sum = {"at_review": 0, "forever": 0}
+        playtime_count = {"at_review": 0, "forever": 0}
+        playtime_buckets = {
+            "at_review": Counter(),
+            "forever": Counter(),
+        }
+        granularity = _timeline_granularity(params.day_range)
+        timeline: defaultdict[str, dict[str, int]] = defaultdict(
+            lambda: {"reviews": 0, "positive": 0}
+        )
+        recent_samples: dict[str, list[dict]] = {
+            "positive": [],
+            "negative": [],
+        }
+        helpful_samples: dict[
+            str, list[tuple[float, int, int, dict]]
+        ] = {"positive": [], "negative": []}
+
+        while True:
+            remaining = (
+                params.max_reviews - reviews_scanned
+                if params.max_reviews > 0
+                else REVIEW_PAGE_SIZE
+            )
+            page_size = (
+                min(REVIEW_PAGE_SIZE, remaining)
+                if params.max_reviews > 0
+                else REVIEW_PAGE_SIZE
+            )
+            data = await _review_page(
+                params.appid,
+                cursor=cursor,
+                sort_by="recent",
+                language=params.language,
+                review_type=params.review_type,
+                purchase_type=params.purchase_type,
+                page_size=page_size,
+                cc=params.country_code,
+                include_offtopic_activity=params.include_offtopic_activity,
+            )
+            pages_fetched += 1
+            if data.get("success") != 1:
+                raise SteamApiError(
+                    f"Steam returned no usable review page for app {params.appid}."
+                )
+            if not query_summary:
+                query_summary = data.get("query_summary") or {}
+
+            raw_reviews = data.get("reviews") or []
+            if not raw_reviews:
+                stop_reason = "api_exhausted"
+                next_cursor = None
+                break
+
+            reached_date_boundary = False
+            reached_scan_limit = False
+            page_review_ids: set[str] = set()
+            for review in raw_reviews:
+                try:
+                    timestamp = int(review.get("timestamp_created") or 0)
+                except (TypeError, ValueError):
+                    timestamp = 0
+                if cutoff is not None and timestamp and timestamp < cutoff:
+                    reached_date_boundary = True
+                    stop_reason = "date_boundary"
+                    break
+
+                recommendationid = str(review.get("recommendationid") or "")
+                if recommendationid:
+                    if recommendationid in page_review_ids:
+                        continue
+                    page_review_ids.add(recommendationid)
+
+                reviews_scanned += 1
+                is_positive = bool(review.get("voted_up"))
+                if is_positive:
+                    positives += 1
+                    sentiment = "positive"
+                else:
+                    negatives += 1
+                    sentiment = "negative"
+
+                if timestamp:
+                    newest_timestamp = (
+                        timestamp
+                        if newest_timestamp is None
+                        else max(newest_timestamp, timestamp)
+                    )
+                    oldest_timestamp = (
+                        timestamp
+                        if oldest_timestamp is None
+                        else min(oldest_timestamp, timestamp)
+                    )
+                    period = _timeline_key(timestamp, granularity)
+                    if period:
+                        timeline[period]["reviews"] += 1
+                        timeline[period]["positive"] += int(is_positive)
+
+                languages[str(review.get("language") or "unknown")] += 1
+                traits["steam_purchase"] += int(bool(review.get("steam_purchase")))
+                traits["received_for_free"] += int(
+                    bool(review.get("received_for_free"))
+                )
+                traits["written_during_early_access"] += int(
+                    bool(review.get("written_during_early_access"))
+                )
+                traits["primarily_steam_deck"] += int(
+                    bool(review.get("primarily_steam_deck"))
+                )
+                traits["developer_response"] += int(
+                    bool((review.get("developer_response") or "").strip())
+                )
+
+                body = str(review.get("review") or "")
+                text_chars += len(body)
+                text_reviews += int(bool(body.strip()))
+
+                author = review.get("author") or {}
+                for label, field in (
+                    ("at_review", "playtime_at_review"),
+                    ("forever", "playtime_forever"),
+                ):
+                    value = author.get(field)
+                    if value is None:
+                        continue
+                    try:
+                        minutes = max(0, int(value))
+                    except (TypeError, ValueError):
+                        continue
+                    playtime_sum[label] += minutes
+                    playtime_count[label] += 1
+                    playtime_buckets[label][_playtime_bucket(minutes)] += 1
+
+                if len(recent_samples[sentiment]) < params.sample_per_bucket:
+                    recent_samples[sentiment].append(review)
+                _keep_helpful_review(
+                    helpful_samples[sentiment],
+                    review,
+                    params.sample_per_bucket,
+                    reviews_scanned,
+                )
+
+                if (
+                    params.max_reviews > 0
+                    and reviews_scanned >= params.max_reviews
+                ):
+                    reached_scan_limit = True
+                    stop_reason = "max_reviews"
+                    break
+
+            candidate_cursor = data.get("cursor")
+            if reached_date_boundary:
+                next_cursor = None
+                break
+            if reached_scan_limit:
+                next_cursor = (
+                    candidate_cursor
+                    if candidate_cursor and candidate_cursor != cursor
+                    else None
+                )
+                break
+            if not candidate_cursor:
+                stop_reason = "cursor_exhausted"
+                next_cursor = None
+                break
+            if candidate_cursor in seen_cursors:
+                stop_reason = "repeated_cursor"
+                next_cursor = None
+                break
+            seen_cursors.add(candidate_cursor)
+            cursor = candidate_cursor
+
+        complete = stop_reason in {
+            "api_exhausted",
+            "cursor_exhausted",
+            "date_boundary",
+        }
+        bucket_order = ("<1h", "1-5h", "5-20h", "20-100h", "100-500h", "500h+")
+
+        def playtime_summary(label: str) -> dict:
+            count = playtime_count[label]
+            return {
+                "reviews_with_data": count,
+                "average_hours": (
+                    round(playtime_sum[label] / count / 60.0, 1) if count else None
+                ),
+                "distribution": {
+                    bucket: playtime_buckets[label].get(bucket, 0)
+                    for bucket in bucket_order
+                },
+            }
+
+        timeline_rows = []
+        for period in sorted(timeline):
+            row = timeline[period]
+            timeline_rows.append(
+                {
+                    "period": period,
+                    "reviews": row["reviews"],
+                    "positive": row["positive"],
+                    "negative": row["reviews"] - row["positive"],
+                    "positive_pct": _pct(row["positive"], row["reviews"]),
+                }
+            )
+
+        helpful_normalized = {}
+        for sentiment, heap in helpful_samples.items():
+            helpful_normalized[sentiment] = [
+                _full_review(item[3], params.max_text_chars)
+                for item in sorted(heap, reverse=True)
+            ]
+        recent_normalized = {
+            sentiment: [
+                _full_review(review, params.max_text_chars) for review in reviews
+            ]
+            for sentiment, reviews in recent_samples.items()
+        }
+
+        available_total = query_summary.get("total_reviews")
+        try:
+            available_total_int = int(available_total)
+        except (TypeError, ValueError):
+            available_total_int = None
+        overall_coverage_pct = (
+            _pct(reviews_scanned, available_total_int)
+            if (
+                params.cursor == "*"
+                and params.day_range is None
+                and available_total_int
+            )
+            else None
+        )
+        result = {
+            "appid": params.appid,
+            "filters": {
+                "start_cursor": params.cursor,
+                "language": params.language,
+                "review_type": params.review_type,
+                "purchase_type": params.purchase_type,
+                "include_offtopic_activity": params.include_offtopic_activity,
+                "day_range": params.day_range,
+            },
+            "scan": {
+                "reviews_scanned": reviews_scanned,
+                "pages_fetched": pages_fetched,
+                "requested_max_reviews": params.max_reviews,
+                "available_total_matching_filters": available_total,
+                "overall_corpus_coverage_pct": overall_coverage_pct,
+                "complete_for_requested_scope": complete,
+                "sampled": not complete,
+                "stop_reason": stop_reason,
+                "next_cursor": next_cursor,
+                "newest_timestamp": newest_timestamp,
+                "newest_at": _iso_utc(newest_timestamp),
+                "oldest_timestamp": oldest_timestamp,
+                "oldest_at": _iso_utc(oldest_timestamp),
+            },
+            "steam_query_summary": {
+                "review_score": query_summary.get("review_score"),
+                "review_score_desc": query_summary.get("review_score_desc"),
+                "total_positive": query_summary.get("total_positive"),
+                "total_negative": query_summary.get("total_negative"),
+                "total_reviews": available_total,
+            },
+            "sentiment": {
+                "positive": positives,
+                "negative": negatives,
+                "positive_pct": _pct(positives, reviews_scanned),
+            },
+            "review_characteristics": {
+                "steam_purchase": {
+                    "count": traits["steam_purchase"],
+                    "pct": _pct(traits["steam_purchase"], reviews_scanned),
+                },
+                "received_for_free": {
+                    "count": traits["received_for_free"],
+                    "pct": _pct(traits["received_for_free"], reviews_scanned),
+                },
+                "written_during_early_access": {
+                    "count": traits["written_during_early_access"],
+                    "pct": _pct(
+                        traits["written_during_early_access"], reviews_scanned
+                    ),
+                },
+                "primarily_steam_deck": {
+                    "count": traits["primarily_steam_deck"],
+                    "pct": _pct(traits["primarily_steam_deck"], reviews_scanned),
+                },
+                "developer_response": {
+                    "count": traits["developer_response"],
+                    "pct": _pct(traits["developer_response"], reviews_scanned),
+                },
+                "reviews_with_text": text_reviews,
+                "average_text_chars": (
+                    round(text_chars / reviews_scanned, 1) if reviews_scanned else 0.0
+                ),
+            },
+            "playtime": {
+                "at_review": playtime_summary("at_review"),
+                "forever": playtime_summary("forever"),
+            },
+            "languages": [
+                {"language": language, "reviews": count, "pct": _pct(count, reviews_scanned)}
+                for language, count in languages.most_common()
+            ],
+            "timeline": {
+                "granularity": granularity,
+                "periods": timeline_rows,
+            },
+            "representative_reviews": {
+                "recent": recent_normalized,
+                "helpful": helpful_normalized,
+            },
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(result)
+
+        scan = result["scan"]
+        sentiment = result["sentiment"]
+        characteristics = result["review_characteristics"]
+        if params.day_range is not None:
+            scope = f"last {params.day_range} days"
+        elif params.cursor != "*":
+            scope = "matching corpus from continuation cursor"
+        else:
+            scope = "newest matching corpus"
+        status = "complete" if complete else f"sampled ({stop_reason})"
+        lines = [
+            f"# Review analysis for app {params.appid}",
+            f"- **Coverage**: {reviews_scanned:,} reviews across {pages_fetched:,} "
+            f"pages; {scope}; {status}",
+            f"- **Sentiment in scan**: {sentiment['positive_pct']}% positive "
+            f"({positives:,} positive / {negatives:,} negative)",
+            f"- **Time covered**: {scan['oldest_at'] or 'n/a'} → "
+            f"{scan['newest_at'] or 'n/a'}",
+            f"- **Steam purchases**: {characteristics['steam_purchase']['pct']}% | "
+            f"received free: {characteristics['received_for_free']['pct']}% | "
+            f"early access: {characteristics['written_during_early_access']['pct']}%",
+            f"- **Primarily Steam Deck**: "
+            f"{characteristics['primarily_steam_deck']['pct']}% | developer replied: "
+            f"{characteristics['developer_response']['pct']}%",
+            f"- **Average playtime at review / now**: "
+            f"{result['playtime']['at_review']['average_hours']}h / "
+            f"{result['playtime']['forever']['average_hours']}h",
+        ]
+        if scan["next_cursor"]:
+            lines.append(f"- **Continuation cursor**: `{scan['next_cursor']}`")
+        if result["languages"]:
+            top_languages = ", ".join(
+                f"{item['language']} {item['pct']}%"
+                for item in result["languages"][:8]
+            )
+            lines.append(f"- **Languages**: {top_languages}")
+
+        if timeline_rows:
+            lines.extend(["", f"## Sentiment by {granularity}"])
+            for row in timeline_rows[-24:]:
+                lines.append(
+                    f"- {row['period']}: {row['positive_pct']}% positive "
+                    f"({row['reviews']:,} reviews)"
+                )
+
+        def append_samples(title: str, reviews: list[dict]) -> None:
+            if not reviews:
+                return
+            lines.extend(["", f"### {title}"])
+            for review in reviews:
+                thumb = "👍" if review["voted_up"] else "👎"
+                text = (review["review"] or "(no written text)").replace("\n", " ")
+                lines.append(
+                    f"- {thumb} {review['votes_up']} helpful, "
+                    f"{review['author']['playtime_at_review_hours']}h at review: {text}"
+                )
+
+        lines.extend(["", "## Representative review text"])
+        append_samples("Recent positive", recent_normalized["positive"])
+        append_samples("Recent negative", recent_normalized["negative"])
+        append_samples("Helpful positive", helpful_normalized["positive"])
+        append_samples("Helpful negative", helpful_normalized["negative"])
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

@@ -4,6 +4,11 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.15.0]
+- **Review corpus limits are now caller-controlled instead of hard-coded.** `steam_get_app_reviews` accepts up to 100 excerpts and adds `recent_max_reviews`; its fast default remains 600, while `0` follows cursors until the requested date window is fully covered.
+- New `steam_get_app_review_batch` exposes Steam's full review payload in cursor pages of up to 100, including author playtime, purchase/free/early-access/Deck flags, helpfulness, edits, and developer responses. Reusing `next_cursor` has no application-level total-review cap.
+- New `steam_analyze_app_reviews` streams 5,000 reviews by default (or all with `max_reviews=0`) into sentiment timelines, language and reviewer/playtime distributions, purchase/free/early-access/Deck/developer-response rates, and bounded recent/helpful positive/negative text samples. Large scans do not retain the complete review corpus in memory and can resume from the returned `next_cursor`.
+
 ## [1.14.0]
 - **The API key is now optional, and the server says so.** 15 of the 37 tools never needed a credential — store, games, reviews, prices, deals, tags, live player counts, Steam Deck, achievement rarity — and the three game-finders (`steam_discover`, `steam_should_i_buy`, `steam_recommend`) join them as long as you don't personalize with a `steamid`. `server.json` no longer marks `STEAM_API_KEY` as required (and now declares `STEAM_USER`, which it never did), so clients stop presenting a key as a precondition to installing. README leads with the keyless quickstart.
 - When no key is configured, the tools that need one are marked `[unavailable: needs STEAM_API_KEY]` in their descriptions and the finders as `[works without a key unless you pass steamid]`. Without that the model picks an account tool, gets an error, and the server looks broken rather than unconfigured. The markers are omitted entirely when a key *is* present — every tool works then, so they would be pure tokens on every request.
