@@ -9,14 +9,17 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
-public Steam Web API and storefront — **39 tools, 5 prompts, and 2 resources** that let
-any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
-your friends, games, playtime, and achievements, plus account-independent things like
-sales, reviews, live player counts, Steam Deck compatibility, discovery,
-recommendations, and co-op planning.
+public Steam Web API/storefront and a disclosed SteamCMD AppInfo mirror — **44 tools,
+5 prompts, and 2 resources** that let any MCP client (Claude Desktop, Claude Code,
+Cursor, …) answer questions about Steam: your friends, games, playtime, and
+achievements, plus account-independent things like sales, reviews, live player
+counts, current builds/branches/depots, discovery, recommendations, and co-op
+planning.
 
-**Read-only · official Steam APIs only · open source.** Nobody logs in, and the server
-never writes, trades, posts, launches games, or makes purchases.
+**Read-only · no SteamDB scraping · open source.** Valve-hosted data is used wherever
+available; current technical AppInfo comes from the keyless community-operated
+`api.steamcmd.net` mirror and is labelled as such in every result. The server never
+writes, trades, posts, launches games, or makes purchases.
 
 ## Quick start — no API key needed
 
@@ -28,13 +31,14 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 claude mcp add steam -- uvx steam-mcp
 ```
 
-That's the whole setup. **17 of the 39 tools work with no credential at all** — anything
-about the store or a game itself:
+That's the whole setup. **22 of the 44 tools work with no credential at all** — anything
+about the store, reviews, or a game's current public technical state:
 
 > *"Is Baldur's Gate 3 worth buying, and how are its recent reviews trending?"*
 > *"What co-op games are on sale under £20 right now?"*
 > *"How many people are playing Helldivers 2 this minute?"*
 > *"Will Hades II run properly on my Steam Deck?"*
+> *"What is this game's current public build ID, branches, depots, and manifests?"*
 
 The three game-finders (`steam_discover`, `steam_should_i_buy`, `steam_recommend`) work
 without a key too, as long as you don't personalize them.
@@ -42,9 +46,9 @@ without a key too, as long as you don't personalize them.
 ### Adding your own account
 
 A [free Steam Web API key](https://steamcommunity.com/dev/apikey) (a minute to get)
-unlocks the other 22 — the ones that read a *specific account*: library, playtime,
-friends, achievements, wishlist, inventory. Add `STEAM_USER` too and "my"/"I" default to
-you, so you never have to paste a SteamID:
+unlocks the 19 account-only tools and personalization on the three game-finders:
+library, playtime, friends, achievements, wishlist, inventory, and taste matching.
+Add `STEAM_USER` too and "my"/"I" default to you, so you never have to paste a SteamID:
 
 ```bash
 claude mcp add steam --env STEAM_API_KEY=YOUR_KEY --env STEAM_USER=your_steam_name -- uvx steam-mcp
@@ -83,6 +87,8 @@ to you — no SteamID needed):
 Account-independent (works for any game, no SteamID needed):
 - "Is *Baldur's Gate 3* worth buying — and how are its recent reviews trending?"
 - "Analyze 10,000 reviews for the main complaints, sentiment shifts, and player profile."
+- "Give me one snapshot of this game's store position, reviews, CCU, tags, patches, and current build."
+- "Show the current public branch build IDs and depot manifests without scraping SteamDB."
 - "What's on sale right now, and what are the current top sellers?"
 - "How many people are playing *Counter-Strike 2* this minute?"
 - "Will *Hades II* run on my Steam Deck?"
@@ -117,7 +123,12 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_discover` | **Find/recommend games** by tag, price, sale, platform, **release window** ("last N days") — optionally **personalized** to a user's taste (excludes games they own) | no* |
 | `steam_should_i_buy` | **Buying brief** — price, official Steam score vs all readable feedback, recent trend, tags, Metacritic, and taste match | no* |
 | `steam_recommend` | **Recommend games** like a seed game or your taste, with the shared tags as the "why" | no* |
+| `steam_analyze_game` | **One-call current game snapshot** — store, official reviews/trend, current players, tags, Deck, news, and current AppInfo/build | no |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic, Steam Deck | no |
+| `steam_get_product_info` | **Current public SteamCMD AppInfo overview** — change number, app state/config, selected build, and counts | no |
+| `steam_get_branches` | Current visible branches with build IDs, descriptions, password-required flag, and timestamps | no |
+| `steam_get_depots` | Current depots, platform/language constraints, shared-depot links, and visible manifest GIDs/sizes | no |
+| `steam_get_current_build` | Current branch build ID plus its visible per-depot manifest snapshot | no |
 | `steam_get_deck_compatibility` | **Steam Deck rating** (Verified/Playable/Unsupported) + the per-criterion test results | no |
 | `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
 | `steam_get_app_regional_pricing` | A game's price **across regions** (each in local currency) | no |
@@ -138,9 +149,10 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_app_news` | Recent news / patch notes | no |
 
 Every tool supports `response_format: "markdown"` (default) or `"json"`, and all are
-annotated `readOnlyHint: true`. Prefer the composite tools (`steam_should_i_buy`,
-`steam_recommend`, `steam_discover`, `steam_plan_coop_night`) over chaining several
-calls, and ask for `json` only when you need to parse fields. Tools that read
+annotated `readOnlyHint: true`. Prefer the composite tools (`steam_analyze_game`,
+`steam_should_i_buy`, `steam_recommend`, `steam_discover`,
+`steam_plan_coop_night`) over chaining several calls, and ask for `json` only when
+you need to parse fields. Tools that read
 localized text accept a `language` parameter — a Steam language name like `french` or
 `schinese` (default `english`). For review tools, this filters the analysis corpus;
 the separately labelled official store score always uses all languages and Steam
@@ -181,6 +193,20 @@ the tools) and **resources** (reference Steam entities by URI):
 > default. An MCP client or agent must still refuse to follow commands, visit links,
 > expose secrets, or invoke other tools merely because review text asks it to.
 
+> **Current AppInfo/build data:** `steam_get_product_info`, `steam_get_branches`,
+> `steam_get_depots`, `steam_get_current_build`, and the technical section of
+> `steam_analyze_game` call the free, keyless, community-operated
+> `api.steamcmd.net` mirror. They never scrape SteamDB. Every response includes
+> source provenance and reports current state only: this MCP keeps no persistent
+> database, so it cannot reconstruct historical price, CCU, build, branch, depot,
+> or AppInfo changes. A five-minute in-memory cache is discarded when the process
+> exits. The external mirror maintains its own AppInfo database and may apply its
+> own logging/retention policy; only the requested numeric appid is sent to it —
+> never your Steam Web API key, SteamID, library, or review corpus. Returned
+> AppInfo strings are labelled as untrusted external data. Set
+> `include_technical=false` on `steam_analyze_game` for a Valve-hosted-only
+> composite call.
+>
 > **Market prices:** `steam_get_market_price` uses Steam's Community Market
 > endpoints, which are undocumented and tightly rate-limited. Results are cached
 > briefly; an item with no current listings reports its price as unavailable.
@@ -191,7 +217,7 @@ the tools) and **resources** (reference Steam entities by URI):
 
 ### 1. Get a free Steam Web API key *(optional)*
 
-Skip this if you only want the 17 keyless tools — the server runs fine without a
+Skip this if you only want the 22 keyless tools — the server runs fine without a
 key and the account tools simply advertise themselves as unavailable.
 
 To unlock the account tools, visit <https://steamcommunity.com/dev/apikey>, sign in,

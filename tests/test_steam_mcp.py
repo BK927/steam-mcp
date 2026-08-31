@@ -1977,6 +1977,11 @@ def test_tools_registered():
     assert "steam_get_app_reviews" in by_name
     assert "steam_get_app_review_batch" in by_name
     assert "steam_analyze_app_reviews" in by_name
+    assert "steam_analyze_game" in by_name
+    assert "steam_get_product_info" in by_name
+    assert "steam_get_branches" in by_name
+    assert "steam_get_depots" in by_name
+    assert "steam_get_current_build" in by_name
     assert "steam_get_dlc" in by_name
     assert "steam_get_user_game_stats" in by_name
     assert "steam_get_app_tags" in by_name
@@ -2008,6 +2013,16 @@ def test_tools_registered():
     assert "day_range" in analysis_schema
     assert "max_pages" in analysis_schema and "max_seconds" in analysis_schema
     assert "include_author_id" in analysis_schema
+    product_schema = json.dumps(
+        _wire(by_name["steam_get_product_info"])["inputSchema"]
+    )
+    assert "branch" in product_schema and "include_launch_options" in product_schema
+    depots_schema = json.dumps(_wire(by_name["steam_get_depots"])["inputSchema"])
+    assert "platform" in depots_schema and "include_all_manifests" in depots_schema
+    game_schema = json.dumps(_wire(by_name["steam_analyze_game"])["inputSchema"])
+    assert "review_max_reviews" in game_schema
+    assert "include_technical" in game_schema
+    assert "platform" in game_schema and "news_count" in game_schema
 
 
 # --------------------------------------------------------------------------- #
@@ -2097,7 +2112,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 39
+    assert len(S.mcp._tool_manager.list_tools()) == 44
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2110,10 +2125,23 @@ def test_tool_descriptions_are_trimmed_to_one_line():
 
 def test_version_is_in_sync_across_metadata():
     import pathlib
+    import steam_mcp
+
     root = pathlib.Path(__file__).resolve().parent.parent
+    assert steam_mcp.__version__ == S.__version__
     assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
     for name in ("server.json", "manifest.json"):
         assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+
+
+def test_manifest_tool_list_matches_registered_surface():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    manifest = json.loads((root / "manifest.json").read_text())
+    documented = {tool["name"] for tool in manifest["tools"]}
+    registered = {tool.name for tool in S.mcp._tool_manager.list_tools()}
+    assert documented == registered
 
 
 def test_cache_hint_methods_are_all_cacheable():
@@ -2491,7 +2519,7 @@ def test_readme_key_column_matches_the_code():
 
     readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 39, f"parsed {len(rows)} tool rows, expected 39"
+    assert len(rows) == 44, f"parsed {len(rows)} tool rows, expected 44"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
