@@ -2,10 +2,10 @@
   "manifest_version": "0.4",
   "name": "steam-mcp",
   "display_name": "Steam (read-only)",
-  "version": "1.15.0",
+  "version": "2.1.0",
   "icon": "icon.png",
-  "description": "Read-only Steam: games, reviews, current builds/depots, prices, players, libraries, friends, and achievements.",
-  "long_description": "A read-only Model Context Protocol server for Valve's public Steam APIs plus a disclosed, keyless community mirror of current public SteamCMD AppInfo. Ask about store details, official review scores and large review corpora, current players, prices, tags, patches, and current build/branch/depot/manifest metadata, as well as public account data such as libraries, friends, playtime, and achievements. The MCP never scrapes SteamDB and stores nothing persistently; technical AppInfo results are current snapshots, not history.\n\nA free Steam Web API key is optional and is only needed for account-specific tools and personalization. The server never sends messages, changes status, launches games, trades, or makes purchases. Friends lists, owned games, and achievements are visible only when the target Steam profile's relevant privacy setting is Public.",
+  "description": "Read-only Steam research through 8 compact game, player, review, community, search, and job tools.",
+  "long_description": "A read-only Model Context Protocol server for Valve's public Steam APIs plus a disclosed, keyless community mirror of current public SteamCMD AppInfo. Eight compact tools cover store data, reviews, prices, tags, live players, current builds, public player data, libraries, achievements, community data, and bounded analysis jobs. The server never scrapes SteamDB and never writes, trades, posts, launches games, or makes purchases.\n\nA free Steam Web API key is optional and is only needed for account-specific views and personalization. Friends lists, owned games, and achievements are visible only when the target Steam profile's relevant privacy setting is Public.",
   "author": {
     "name": "Sarg",
     "url": "https://github.com/Sarg338/steam-mcp"
@@ -50,180 +50,36 @@
   },
   "tools": [
     {
-      "name": "steam_resolve_vanity_url",
-      "description": "Resolve a vanity name or profile URL to a SteamID64"
+      "name": "steam_game_get",
+      "description": "Get a Steam game's store, technical, DLC, tag, achievement, live, news, or pricing view"
     },
     {
-      "name": "steam_get_player_summary",
-      "description": "Profile and live status (Online/Away/In-Game) for 1-100 users"
+      "name": "steam_player_get",
+      "description": "Get public Steam profile, social, library, wishlist, progress, or inventory data"
     },
     {
-      "name": "steam_get_friend_list",
-      "description": "A user's friends, enriched with name and live status"
+      "name": "steam_search",
+      "description": "Look up or discover Steam games, deals, and charts"
     },
     {
-      "name": "steam_find_friends_who_own",
-      "description": "Which of a user's friends own (or are playing) a given game"
+      "name": "steam_reviews_get",
+      "description": "Get a bounded Steam review summary or signed-cursor page"
     },
     {
-      "name": "steam_get_user_groups",
-      "description": "The Steam groups/clans a user belongs to (name, URL, member count)"
+      "name": "steam_community_get",
+      "description": "Get Steam package, Workshop, or Community Market data"
     },
     {
-      "name": "steam_get_inventory",
-      "description": "A user's inventory \u2014 game items or Steam Community items (cards, emoticons), with tradable/marketable flags"
+      "name": "steam_analyze",
+      "description": "Start one of eight bounded Steam analysis jobs"
     },
     {
-      "name": "steam_get_market_price",
-      "description": "Community Market price for an item (lowest/median/volume) with type/rarity and CS2 condition"
+      "name": "steam_job_get",
+      "description": "Read Steam analysis job status or a bounded result page"
     },
     {
-      "name": "steam_get_owned_games",
-      "description": "Owned games with total and recent hours played"
-    },
-    {
-      "name": "steam_analyze_library",
-      "description": "Backlog, playtime distribution, and abandoned games across a whole library"
-    },
-    {
-      "name": "steam_get_recently_played_games",
-      "description": "Games played in the last two weeks"
-    },
-    {
-      "name": "steam_get_steam_level",
-      "description": "A user's Steam community level"
-    },
-    {
-      "name": "steam_get_player_bans",
-      "description": "VAC / game / community / economy ban status"
-    },
-    {
-      "name": "steam_get_player_achievements",
-      "description": "Per-game unlocked vs locked achievements"
-    },
-    {
-      "name": "steam_get_game_schema",
-      "description": "A game's full achievement and stat definitions"
-    },
-    {
-      "name": "steam_get_global_achievement_percentages",
-      "description": "Global achievement rarity (unlock %)"
-    },
-    {
-      "name": "steam_get_user_game_stats",
-      "description": "A user's in-game stats (kills, wins, distance, etc.) for a game"
-    },
-    {
-      "name": "steam_get_rarest_unlocks",
-      "description": "A player's rarest unlocked achievements in a game, by global rarity"
-    },
-    {
-      "name": "steam_search_apps",
-      "description": "Search the store by title to find a game's appid"
-    },
-    {
-      "name": "steam_discover",
-      "description": "Find/recommend games by tag, price, sale, platform, release window \u2014 optionally personalized to a user's taste"
-    },
-    {
-      "name": "steam_should_i_buy",
-      "description": "Buying brief: price, official Steam score vs all readable feedback, recent trend, tags, Metacritic, and taste match"
-    },
-    {
-      "name": "steam_recommend",
-      "description": "Recommend games like a seed game or your taste, with the matching tags as reasons"
-    },
-    {
-      "name": "steam_analyze_game",
-      "description": "One-call current snapshot: store, official reviews/trend, players, tags, Deck, news, and current AppInfo/build"
-    },
-    {
-      "name": "steam_plan_coop_night",
-      "description": "Co-op games the host + friends all own (or, in mode=new, fresh co-op games none of them own yet), with who's online now"
-    },
-    {
-      "name": "steam_get_app_details",
-      "description": "Full store details: price, devs, genres, play modes/co-op, controller, DLC, languages, requirements, Steam Deck rating"
-    },
-    {
-      "name": "steam_get_product_info",
-      "description": "Current public SteamCMD AppInfo overview: change number, state/config, selected build, and counts"
-    },
-    {
-      "name": "steam_get_branches",
-      "description": "Current visible AppInfo branches with build IDs and update timestamps"
-    },
-    {
-      "name": "steam_get_depots",
-      "description": "Current depots and visible manifest GIDs with platform, language, and size metadata"
-    },
-    {
-      "name": "steam_get_current_build",
-      "description": "Current branch build ID plus its visible per-depot manifest snapshot"
-    },
-    {
-      "name": "steam_get_deck_compatibility",
-      "description": "Steam Deck rating (Verified/Playable/Unsupported) + per-criterion test results"
-    },
-    {
-      "name": "steam_get_app_regional_pricing",
-      "description": "A game's price across regions, each in its own local currency"
-    },
-    {
-      "name": "steam_get_workshop_item",
-      "description": "Steam Workshop item metadata (title, game, tags, subscribers, favorites, views)"
-    },
-    {
-      "name": "steam_get_dlc",
-      "description": "A game's DLC, with live prices and what's on sale"
-    },
-    {
-      "name": "steam_get_app_tags",
-      "description": "A game's top community tags (Souls-like, Roguelike, Cozy, etc.)"
-    },
-    {
-      "name": "steam_get_app_reviews",
-      "description": "Official all-language Steam-purchase score plus a separately filtered feedback corpus, samples, and recent scans"
-    },
-    {
-      "name": "steam_get_app_review_batch",
-      "description": "A cursor page of up to 100 sanitized full reviews; reviewer SteamIDs are opt-in"
-    },
-    {
-      "name": "steam_analyze_app_reviews",
-      "description": "Resumable large-corpus review analysis with segment sentiment and partial-progress preservation on budgets/errors"
-    },
-    {
-      "name": "steam_get_featured_specials",
-      "description": "Games currently on sale (regional)"
-    },
-    {
-      "name": "steam_get_store_highlights",
-      "description": "Top sellers, new releases, or coming soon"
-    },
-    {
-      "name": "steam_get_wishlist",
-      "description": "A user's wishlist, with live prices and what's on sale"
-    },
-    {
-      "name": "steam_get_player_badges",
-      "description": "Badges + the XP breakdown behind a user's Steam level"
-    },
-    {
-      "name": "steam_get_package_details",
-      "description": "Details for a package/bundle (price, included games)"
-    },
-    {
-      "name": "steam_compare_players",
-      "description": "Shared games between two users, with playtime"
-    },
-    {
-      "name": "steam_get_current_players",
-      "description": "Live concurrent player count for a game"
-    },
-    {
-      "name": "steam_get_app_news",
-      "description": "Recent news and patch notes for a game"
+      "name": "steam_job_cancel",
+      "description": "Request cooperative cancellation of a Steam analysis job"
     }
   ],
   "tools_generated": false,
@@ -242,7 +98,7 @@
     "steam_api_key": {
       "type": "string",
       "title": "Steam Web API Key (optional)",
-      "description": "Optional. 22 of the 44 tools \u2014 store, reviews, prices, current players, current AppInfo/builds/depots, deals, Steam Deck, and achievement rarity \u2014 work with no key at all. A key (32 hex characters, free at https://steamcommunity.com/dev/apikey) unlocks 19 account-only tools plus personalization: library, playtime, friends, achievements, wishlist, inventory, and taste matching.",
+      "description": "Optional. Keyless game, store, review, price, AppInfo, and community views remain available; the key enables account-specific player views and personalization.",
       "sensitive": true,
       "required": false,
       "default": ""
@@ -250,7 +106,7 @@
     "steam_user": {
       "type": "string",
       "title": "Your Steam name (optional)",
-      "description": "Your own Steam vanity name, SteamID64, or profile URL. When set, tools like 'analyze my library' or 'my wishlist' default to you, so you don't have to give your ID each time.",
+      "description": "Your public Steam vanity name, SteamID64, or profile URL. Single-player requests may default to it.",
       "sensitive": false,
       "required": false,
       "default": ""

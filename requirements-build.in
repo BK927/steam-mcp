@@ -1,0 +1,2 @@
+# The project build backend is installed from the same hash-locked runtime set.
+hatchling

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "steam-mcp": {
+      "type": "http",
+      "url": "https://steam-mcp-f6wkf5w2hq-an.a.run.app/mcp",
+      "bearer_token_env_var": "STEAM_MCP_ACCESS_TOKEN"
+    }
+  }
+}

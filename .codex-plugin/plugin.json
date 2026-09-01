@@ -1,0 +1,34 @@
+{
+  "name": "steam-mcp",
+  "version": "2.1.0",
+  "description": "Read-only Steam game, store, review, player, community, and analysis research.",
+  "author": {
+    "name": "Sarg"
+  },
+  "homepage": "https://github.com/Sarg338/steam-mcp",
+  "repository": "https://github.com/Sarg338/steam-mcp",
+  "license": "MIT",
+  "keywords": [
+    "steam",
+    "games",
+    "reviews",
+    "mcp"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Steam MCP",
+    "shortDescription": "Research Steam games, players, reviews, and market data.",
+    "longDescription": "A read-only Steam research plugin with compact tools for store data, public players, reviews, community data, and resumable analysis jobs.",
+    "developerName": "Sarg",
+    "category": "Productivity",
+    "capabilities": [
+      "Read-only Steam research",
+      "Local and Cloud MCP"
+    ],
+    "defaultPrompt": [
+      "Compare these Steam games and summarize the tradeoffs.",
+      "Check this Steam game's reviews, price, and compatibility.",
+      "Analyze my public Steam library and recommend what to play next."
+    ]
+  }
+}

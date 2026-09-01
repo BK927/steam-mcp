@@ -1,78 +1,147 @@
-# Deploying Steam MCP to Google Cloud Run
+# Steam MCP on Google Cloud Run
 
-This deployment keeps the existing local stdio mode and adds a stateless Streamable HTTP endpoint for Codex plugins.
+This is the production profile for Steam MCP 2.1.0. It preserves local stdio but uses managed Google Cloud state for remote work. No deployment has been executed from this repository as part of the refactor.
 
-## What is deployed
+## Fixed v1 topology
 
-- MCP: `https://SERVICE_URL/mcp`
-- Health: `https://SERVICE_URL/health`
-- Transport: Streamable HTTP
-- Access: public Cloud Run ingress plus a separate 64-character bearer token
-- Scale: zero minimum instances and one maximum instance
+| Resource | Name/default | Region and capacity | Exposure |
+| --- | --- | --- | --- |
+| Artifact Registry | `mcp/steam-mcp` | `asia-northeast1` | private |
+| MCP Cloud Run service | `steam-mcp` | 1 vCPU, 512 MiB, concurrency 10, timeout 300 s, min 0, max 1 | public ingress; bearer required at `/mcp` |
+| Worker Cloud Run service | `steam-mcp-worker` | 1 vCPU, 1 GiB, concurrency 1, timeout 1,800 s, min 0, max 2 | private IAM |
+| Cloud Tasks queue | `steam-mcp-jobs` | `asia-northeast1`; 1 dispatch/s, 2 concurrent, 3 attempts | runtime identity can enqueue |
+| Firestore | `(default)` / `steam_jobs` | Native mode, `asia-northeast1` | runtime and worker identities |
+| Cloud Storage | `PROJECT-steam-mcp-jobs` | `asia-northeast1`, uniform access, public access prevention | runtime read; worker object admin |
 
-The Steam Web API key is optional. Without it, the store, reviews, pricing, player counts, discovery, and current AppInfo/build/depot tools remain available. Account-specific tools require the key and can only read information that Steam exposes publicly.
+The container image is identical for the MCP and worker services. `STEAM_PROCESS_ROLE=mcp|worker` selects the entrypoint behavior. The worker exposes only `/healthz` and `POST /internal/jobs/run`; it does not expose `/mcp`.
+
+Firestore stores job state and an `expires_at` Timestamp. Its TTL policy removes expired job documents asynchronously. Cloud Storage deletes result objects when their age reaches seven days. The application sets cloud job expiry to 604,800 seconds; TTL deletion is not an immediate scheduling guarantee.
+
+## Identities and least privilege
+
+| Identity | Required access |
+| --- | --- |
+| `steam-mcp-runner` | Firestore `datastore.user`, Cloud Tasks enqueuer, bucket object viewer, act-as on `steam-mcp-tasks`, access only to the MCP/worker/cursor/optional Steam secrets it consumes |
+| `steam-mcp-worker` | Firestore `datastore.user`, bucket object admin, access only to worker/cursor/optional Steam secrets |
+| `steam-mcp-tasks` | Cloud Run invoker on `steam-mcp-worker` only |
+| Cloud Build default identity | Artifact Registry writer on repository `mcp` only |
+
+Cloud Run IAM plus the Cloud Tasks OIDC token is the worker authorization boundary. `STEAM_JOB_WORKER_TOKEN` adds a second private header check; it is not a substitute for IAM. The OIDC audience is the exact worker URL including `/internal/jobs/run`, registered as a Cloud Run custom audience.
 
 ## Prerequisites
 
-1. Install Google Cloud CLI and sign in.
-2. Select a Google Cloud project with billing enabled.
-3. Optionally obtain a Steam Web API key from `https://steamcommunity.com/dev/apikey`.
+- PowerShell 7 (`pwsh`), Git, `uv`, and a current Google Cloud CLI.
+- A billed Google Cloud project.
+- Operator permission to enable APIs, create IAM/service accounts, Firestore, Storage, Cloud Tasks, Artifact Registry, Secret Manager, Cloud Build, and Cloud Run resources.
+- A clean Git worktree. Deployment refuses dirty state because an image tagged with a commit SHA must represent that exact source tree.
 
-Docker Desktop is not required. The deployment uses Cloud Build with the repository Dockerfile.
-
-## Deploy
+## One-time provisioning
 
 ```powershell
-cd C:\Users\dead4\repo\steam-mcp
-
-pwsh -ExecutionPolicy Bypass -File .\scripts\deploy-cloud-run.ps1 `
-  -ProjectId "YOUR_PROJECT_ID"
+pwsh -File .\scripts\provision-gcp.ps1 `
+  -ProjectId "YOUR_PROJECT_ID" `
+  -Region "asia-northeast1"
 ```
 
-To configure the optional Steam API key during deployment:
+Optionally initialize or replace the Steam Web API key:
 
 ```powershell
-pwsh -ExecutionPolicy Bypass -File .\scripts\deploy-cloud-run.ps1 `
+pwsh -File .\scripts\provision-gcp.ps1 `
   -ProjectId "YOUR_PROJECT_ID" `
   -ConfigureSteamApiKey
 ```
 
-The script enables the required Google Cloud APIs, creates the runtime identity, stores credentials in Secret Manager, deploys to Cloud Run, pins Host validation to the generated service URL, and saves the MCP bearer token as the Windows user environment variable `STEAM_MCP_ACCESS_TOKEN`.
+Provisioning is idempotent for infrastructure and does not rotate an existing MCP bearer, worker token, or cursor secret. It creates an initial random value only when the corresponding secret has no enabled version. The cursor secret is independently pinned to both revisions so restarts and two workers can verify the same opaque cursors. If `(default)` Firestore already exists outside `asia-northeast1`, the script stops instead of silently creating a cross-region design.
 
-## Verify
-
-Open a new PowerShell window after deployment:
+## Candidate deployment and promotion
 
 ```powershell
-$baseUrl = "https://YOUR_SERVICE_URL"
-Invoke-RestMethod "$baseUrl/health"
-
-try {
-  Invoke-WebRequest "$baseUrl/mcp"
-} catch {
-  $_.Exception.Response.StatusCode.value__
-}
+pwsh -File .\scripts\deploy-cloud-run.ps1 `
+  -ProjectId "YOUR_PROJECT_ID" `
+  -Region "asia-northeast1" `
+  -Promote
 ```
 
-The health endpoint returns `ok: true`; the unauthenticated MCP request returns `401`.
+The script performs this sequence:
 
-A Codex plugin can use:
+1. Require a clean Git commit and build `steam-mcp:GIT_SHA` with Cloud Build.
+2. Resolve `sha256:...` from Artifact Registry and deploy only `IMAGE@DIGEST`.
+3. Create a private worker `candidate` revision with `--no-traffic`.
+4. Grant only `steam-mcp-tasks` the worker invoker role.
+5. Create a public MCP `candidate` revision with `--no-traffic` and exact stable/candidate Host allowlists.
+6. Smoke candidate `/healthz` and unauthenticated rejection, then use the pinned MCP v2 client to negotiate protocol/SSE, require the exact eight-tool list with no legacy names, and complete a representative keyless `steam_game_get` call against the candidate URL.
+7. With `-Promote`, move the worker to 100% first and the MCP service to 100% second. Without it, both final candidates stay at 0%.
 
-```json
-{
-  "mcpServers": {
-    "steam": {
-      "type": "http",
-      "url": "https://YOUR_SERVICE_URL/mcp",
-      "bearer_token_env_var": "STEAM_MCP_ACCESS_TOKEN"
-    }
-  }
-}
+On the first deployment there is no old revision to retain traffic. Cloud Run must create zero-traffic bootstrap revisions to discover stable service and tag URLs. The script requires `-Promote`, keeps bearer/IAM protection enabled, immediately replaces those bootstraps with hardened zero-traffic candidates from the same digest, smokes them, and promotes them in the same run.
+
+Access and optional API secrets are referenced as concrete numeric versions. Existing bearer tokens are reused. Rotate only when explicitly requested:
+
+```powershell
+pwsh -File .\scripts\deploy-cloud-run.ps1 `
+  -ProjectId "YOUR_PROJECT_ID" `
+  -RotateAccessToken `
+  -Promote
 ```
 
-## Security and cost
+Rotation creates a new numeric version. The local Windows user variable `STEAM_MCP_ACCESS_TOKEN` is updated only after `-Promote`, so a zero-traffic candidate cannot silently replace the credential for the still-serving revision. Old secret versions remain available for deliberate rollback until the operator disables them.
 
-- The Steam API key and MCP bearer token are stored in Secret Manager, not the repository.
-- The deployment is read-only and does not trade, purchase, post, launch games, or change Steam accounts.
-- Cloud Run scales to zero when idle. Builds and retained Artifact Registry images can still create small charges.
-- The static bearer token is appropriate for a private personal plugin. A public multi-user plugin should implement standards-based MCP OAuth before publication.
+## Verification
+
+The deploy script already checks the candidate. After promotion:
+
+```powershell
+$baseUrl = "https://YOUR_STEAM_SERVICE.run.app"
+Invoke-RestMethod "$baseUrl/healthz"
+
+$headers = @{
+  Authorization = "Bearer $env:STEAM_MCP_ACCESS_TOKEN"
+  Accept = "application/json, text/event-stream"
+  "MCP-Protocol-Version" = "2026-07-28"
+}
+$body = '{"jsonrpc":"2.0","id":"verify","method":"tools/list","params":{}}'
+Invoke-WebRequest "$baseUrl/mcp" -Method Post -Headers $headers -ContentType application/json -Body $body
+```
+
+The request body limit is 2 MiB. Tool results default to 12 KiB and cannot exceed 32 KiB.
+
+## Rollback
+
+List ready revisions and their images/secrets before selecting an exact pair:
+
+```powershell
+gcloud run revisions list --service steam-mcp --region asia-northeast1 --project YOUR_PROJECT_ID
+gcloud run revisions list --service steam-mcp-worker --region asia-northeast1 --project YOUR_PROJECT_ID
+```
+
+Then roll the public service back first so it stops issuing new-format jobs, followed by its matching worker:
+
+```powershell
+pwsh -File .\scripts\rollback-cloud-run.ps1 `
+  -ProjectId "YOUR_PROJECT_ID" `
+  -McpRevision "KNOWN_GOOD_MCP_REVISION" `
+  -WorkerRevision "MATCHING_WORKER_REVISION"
+```
+
+Traffic changes do not rebuild the image. Because secret references are revision-scoped numeric versions, a rollback also restores the prior revision's configured secret versions.
+
+## Operations, security, and cost
+
+- Main and worker scale to zero. Firestore, Cloud Storage, Cloud Tasks, Artifact Registry retention, Cloud Build, logging, and outbound Steam traffic can still incur charges.
+- Maximum one MCP instance avoids gratuitous cache duplication; correctness does not rely on its memory because cloud job state is external. The worker can scale to two, matching queue concurrency.
+- Logs must never include bearer/API key values, Cloud Tasks authorization headers, cursor secrets, or raw untrusted review bodies.
+- Alert on Cloud Run 5xx/latency, Cloud Tasks oldest task age and retry exhaustion, Firestore errors, bucket growth, and Steam upstream throttling.
+- Keep the API key restrictions, bucket public-access prevention, Firestore delete protection, and service-specific secret IAM under drift review.
+- The fixed bearer is suitable for a private operator plugin. A shared external product needs MCP-native per-user authorization, audit, quotas, and revocation.
+
+## Reproducibility boundary
+
+The Python base image is pinned by patch tag and a verified multi-platform index digest. `requirements.lock` contains the complete universal runtime/build dependency graph with exact versions and distribution hashes; Docker and CI both install it with `--require-hashes`. The project is then installed with `--no-build-isolation --no-deps`, so the pinned Hatchling and runtime graph are reused instead of resolving during a build. `requirements-dev.lock` separately fixes the test/lint graph so it does not enlarge the production image.
+
+The Debian `ca-certificates` package installed with `apt` is not snapshot-pinned, so rebuilding an old commit can still receive a later Debian security revision. This boundary is documented instead of claiming a bit-for-bit image rebuild.
+
+Regenerate and review the locks explicitly when dependencies change:
+
+```powershell
+uv pip compile pyproject.toml requirements-build.in --extra gcp --universal --python-version 3.10 --generate-hashes --output-file requirements.lock
+uv pip compile requirements-dev.in --universal --python-version 3.10 --generate-hashes --output-file requirements-dev.lock
+```

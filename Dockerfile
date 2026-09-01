@@ -1,4 +1,5 @@
-FROM python:3.13-slim
+ARG PYTHON_IMAGE="python:3.13.11-slim-bookworm@sha256:20080e807bfc404f8450b185cf0fc95d553462673598549613735f70a5b4d5d0"
+FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -11,9 +12,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE PRIVACY.md ./
+COPY pyproject.toml requirements.lock README.md LICENSE PRIVACY.md ./
 COPY steam_mcp ./steam_mcp
-RUN pip install --no-cache-dir .
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && python -m pip install --no-cache-dir --no-build-isolation --no-deps .
 
 RUN useradd --create-home --uid 10001 appuser
 USER appuser

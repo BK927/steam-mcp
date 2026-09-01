@@ -1,4 +1,4 @@
-mcp>=1.28
+mcp>=2.0,<3
 httpx2>=2.9
 pydantic>=2.6.0
 uvicorn>=0.31

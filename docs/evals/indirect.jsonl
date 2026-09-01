@@ -1,0 +1,10 @@
+{"id":"steam-indirect-01","prompt":"AppID 1091500의 현재 상점 가격과 동시 접속자 수가 궁금해.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-02","prompt":"이 게임의 public branch build ID와 depot manifest를 확인해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-03","prompt":"최근 30일 사용자 평가가 전체 평가와 얼마나 달라졌는지 봐줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-04","prompt":"내 공개 게임 라이브러리에서 오래 방치한 타이틀을 찾아줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-05","prompt":"덱에서 Verified인 저렴한 협동 로그라이크를 골라줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-06","prompt":"친구 둘과 공통으로 가진 게임 중 오늘 할 만한 걸 추천해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-07","prompt":"이 프로필의 공개 배지, 레벨, 밴 상태를 한 번에 확인해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-08","prompt":"상점 태그가 소울라이크인 신작을 가격순으로 찾아줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-09","prompt":"리뷰 5천 건을 분석해야 하니 비동기 작업으로 처리하고 결과만 요약해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-indirect-10","prompt":"현재 빌드가 지난번에 기록한 build ID와 달라졌는지 확인해줘.","expected_plugin":"steam-mcp"}

@@ -1,0 +1,10 @@
+{"id":"steam-direct-01","prompt":"Steam에서 Baldur's Gate 3의 현재 가격과 최근 리뷰 경향을 알려줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-02","prompt":"내 Steam 프로필의 공개 라이브러리에서 협동 게임 후보를 찾아줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-03","prompt":"Steam AppID 1245620의 현재 빌드와 depot 정보를 확인해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-04","prompt":"Steam에서 최근 평가가 전체 평가보다 나빠진 게임인지 분석해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-05","prompt":"Steam Deck 호환성이 좋은 로그라이크를 검색해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-06","prompt":"Steam 친구들과 모두 보유한 멀티플레이 게임을 찾아줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-07","prompt":"Steam 게임 두 개의 가격, 동접, 리뷰를 비교해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-08","prompt":"Steam 공개 프로필의 업적 진행률을 확인해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-09","prompt":"Steam Community Market에서 AK-47 | Redline (Field-Tested)의 현재 공개 호가를 확인해줘.","expected_plugin":"steam-mcp"}
+{"id":"steam-direct-10","prompt":"Steam 리뷰 분석 작업을 시작하고 완료될 때까지 상태를 확인해줘.","expected_plugin":"steam-mcp"}

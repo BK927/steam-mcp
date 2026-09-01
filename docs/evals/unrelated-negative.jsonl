@@ -1,0 +1,10 @@
+{"id":"common-negative-01","prompt":"서울의 이번 주말 날씨를 알려줘.","expected_plugin":null}
+{"id":"common-negative-02","prompt":"이 이메일을 더 정중한 한국어로 다듬어줘.","expected_plugin":null}
+{"id":"common-negative-03","prompt":"CSV 매출 데이터를 월별로 합산하는 공식을 만들어줘.","expected_plugin":null}
+{"id":"common-negative-04","prompt":"파이썬에서 이진 탐색을 구현해줘.","expected_plugin":null}
+{"id":"common-negative-05","prompt":"다음 회의록에서 액션 아이템만 추려줘.","expected_plugin":null}
+{"id":"common-negative-06","prompt":"도쿄 3박 4일 여행 일정을 짜줘.","expected_plugin":null}
+{"id":"common-negative-07","prompt":"계약서의 손해배상 조항을 쉬운 말로 설명해줘.","expected_plugin":null}
+{"id":"common-negative-08","prompt":"브랜드 랜딩 페이지의 색상 팔레트를 제안해줘.","expected_plugin":null}
+{"id":"common-negative-09","prompt":"오늘 할 일을 우선순위 순으로 정리해줘.","expected_plugin":null}
+{"id":"common-negative-10","prompt":"이 SQL 쿼리의 실행 계획을 최적화해줘.","expected_plugin":null}

@@ -4,6 +4,16 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [2.1.0] — Patch B: managed cloud jobs
+- Added the GCP job adapter: Cloud Tasks OIDC dispatch to a private same-image worker, Firestore job state, and seven-day Cloud Storage results.
+- Added SHA-tag/digest-pinned candidate Cloud Run rollout, explicit bearer rotation, numeric secret versions, smoke gates, promotion, and paired rollback.
+- Standardized signed 24-hour cursors, 12 KiB default/32 KiB hard result limits, `/healthz`, and a 2 MiB HTTP request limit.
+
+## [2.0.0] — Patch A: compact MCP surface
+- Replaced the legacy 44-tool catalog with eight task-oriented read-only tools. Pre-2.0 tool names are not retained.
+- Consolidated game, player, search, review, community, and analysis operations under consistent envelopes, errors, pagination, and job handles.
+- Moved to the MCP Python SDK v2-only runtime while preserving local stdio and stateless Streamable HTTP profiles.
+
 ## [1.15.0]
 - **Review corpus limits are now caller-controlled instead of hard-coded.** `steam_get_app_reviews` accepts up to 100 excerpts and adds `recent_max_reviews`; its fast default remains 600, while `0` follows cursors until the requested date window is fully covered.
 - New `steam_get_app_review_batch` exposes Steam's full review payload in cursor pages of up to 100, including author playtime, purchase/free/early-access/Deck flags, helpfulness, edits, and developer responses. Reusing `next_cursor` has no application-level total-review cap.

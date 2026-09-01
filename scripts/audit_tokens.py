@@ -35,7 +35,7 @@ import sys
 # Make the package importable whether or not it's pip-installed.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import steam_mcp.server as S  # noqa: E402
+import steam_mcp.legacy_backend as S  # noqa: E402
 from steam_mcp.server import mcp  # noqa: E402
 
 # --- Budgets (fail the audit if exceeded) -------------------------------------
@@ -44,8 +44,8 @@ from steam_mcp.server import mcp  # noqa: E402
 # tool descriptions (_compact_descriptions already trims those). If you trim the
 # schemas later, re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate
 # stays meaningful.
-DEFS_TOKEN_BUDGET = 15_000    # all tool defs on the wire (baseline ~13.9k)
-PER_TOOL_TOKEN_WARN = 700     # flag a single tool def that's an outlier
+DEFS_TOKEN_BUDGET = 1_500     # compact public v2 registry (baseline ~1.33k)
+PER_TOOL_TOKEN_WARN = 250     # compact per-tool schema target (baseline max ~247)
 RESPONSE_HARD_CAP = 25_000    # Anthropic's per-response guidance (hard fail)
 RESPONSE_WARN = 20_000        # warn band approaching the cap
 

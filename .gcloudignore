@@ -5,7 +5,11 @@
 __pycache__
 .pytest_cache
 .ruff_cache
+.uv-cache*
 tests
+docs
 *.pyc
 *.mcpb
 .env
+.env.*
+!.env.example

@@ -4,7 +4,7 @@ import asyncio
 import json
 
 import steam_mcp.product_info as P
-import steam_mcp.server as S
+import steam_mcp.legacy_backend as S
 
 
 def run(coro):

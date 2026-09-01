@@ -12,7 +12,8 @@ import re
 import pytest
 from pydantic import ValidationError
 
-import steam_mcp.server as S
+import steam_mcp.legacy_backend as S
+import steam_mcp.server as Public
 
 
 def run(coro):
@@ -471,13 +472,13 @@ def test_plan_coop_night(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_prompts_registered():
-    names = {p.name for p in run(S.mcp.list_prompts())}
+    names = {p.name for p in run(S.legacy_mcp.list_prompts())}
     assert {"what_should_i_play", "is_it_worth_buying", "plan_game_night",
             "steam_deals", "game_overview"} <= names
 
 
 def test_prompt_renders():
-    res = run(S.mcp.get_prompt("plan_game_night", {"steamid": "123"}))
+    res = run(S.legacy_mcp.get_prompt("plan_game_night", {"steamid": "123"}))
     text = " ".join(getattr(m.content, "text", str(m.content)) for m in res.messages)
     assert "steam_plan_coop_night" in text and "123" in text
 
@@ -493,7 +494,7 @@ def _wire(model):
 
 
 def test_resources_registered():
-    uris = {_wire(t)["uriTemplate"] for t in run(S.mcp.list_resource_templates())}
+    uris = {_wire(t)["uriTemplate"] for t in run(S.legacy_mcp.list_resource_templates())}
     assert "steam://app/{appid}" in uris
     assert "steam://user/{steamid}" in uris
 
@@ -504,7 +505,7 @@ def test_resource_app_reads(monkeypatch):
                         "data": {"name": "Dota 2", "type": "game", "is_free": True}}}
 
     monkeypatch.setattr(S, "_store_get", fake_store)
-    parts = list(run(S.mcp.read_resource("steam://app/570")))
+    parts = list(run(S.legacy_mcp.read_resource("steam://app/570")))
     text = " ".join(str(getattr(p, "content", p)) for p in parts)
     assert "Dota 2" in text
 
@@ -821,7 +822,7 @@ def test_market_price_unavailable(monkeypatch):
 def test_descriptions_compact():
     # The model pays for tool descriptions every request; they must be one-line
     # summaries, not the full multi-paragraph docstrings.
-    tools = run(S.mcp.list_tools())
+    tools = run(S.legacy_mcp.list_tools())
     for t in tools:
         assert "\n\n" not in (t.description or ""), t.name
     total = sum(len(t.description or "") for t in tools)
@@ -1972,7 +1973,7 @@ def test_tools_registered():
     """Reviews tool must be wired to the real function (regression: the
     @mcp.tool decorator used to sit on the _fmt_review helper), and the new
     0.7.0 tools must be registered."""
-    tools = run(S.mcp.list_tools())
+    tools = run(S.legacy_mcp.list_tools())
     by_name = {t.name: t for t in tools}
     assert "steam_get_app_reviews" in by_name
     assert "steam_get_app_review_batch" in by_name
@@ -2111,15 +2112,17 @@ def test_friends_who_own(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_server_registers_its_surface():
-    """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 44
-    assert len(S.mcp._prompt_manager.list_prompts()) == 5
+    """Only the compact v2 public registry is exposed."""
+    assert len(Public.mcp._tool_manager.list_tools()) == 8
+    assert len(Public.mcp._prompt_manager.list_prompts()) == 0
+    assert len(Public.mcp._resource_manager.list_resources()) == 0
+    assert len(Public.mcp._resource_manager.list_templates()) == 5
 
 
 def test_tool_descriptions_are_trimmed_to_one_line():
     """_compact_descriptions() reaches into SDK internals; catch it silently
     no-opping if the tool-manager shape changes under either major."""
-    for tool in S.mcp._tool_manager.list_tools():
+    for tool in Public.mcp._tool_manager.list_tools():
         assert "\n" not in (tool.description or ""), tool.name
 
 
@@ -2140,7 +2143,7 @@ def test_manifest_tool_list_matches_registered_surface():
     root = pathlib.Path(__file__).resolve().parent.parent
     manifest = json.loads((root / "manifest.json").read_text())
     documented = {tool["name"] for tool in manifest["tools"]}
-    registered = {tool.name for tool in S.mcp._tool_manager.list_tools()}
+    registered = {tool.name for tool in Public.mcp._tool_manager.list_tools()}
     assert documented == registered
 
 
@@ -2160,7 +2163,7 @@ def test_cache_hints_reach_the_wire():
     from mcp import Client
 
     async def go():
-        async with Client(S.mcp) as client:
+        async with Client(Public.mcp) as client:
             assert client.protocol_version == "2026-07-28"
             assert client.server_info.version == S.__version__
             listing = await client.list_tools()
@@ -2220,7 +2223,7 @@ def _elicit_client(answer=None, action="accept", **kwargs):
             return ElicitResult(action=action)
         return ElicitResult(action="accept", content={"steam_account": answer})
 
-    return Client(S.mcp, elicitation_callback=callback, **kwargs), asked
+    return Client(S.legacy_mcp, elicitation_callback=callback, **kwargs), asked
 
 
 def _call_level(client, args):
@@ -2234,7 +2237,7 @@ def _call_level(client, args):
 @v2_only
 def test_resolver_parameter_is_invisible_to_the_model():
     """The 'who are you' parameter must never reach a tool's input schema."""
-    for tool in run(S.mcp.list_tools()):
+    for tool in run(Public.mcp.list_tools()):
         assert "default_user" not in json.dumps(_wire(tool)["inputSchema"]), tool.name
 
 
@@ -2243,7 +2246,7 @@ def test_keyless_finders_never_ask():
     """discover / should_i_buy / recommend treat an omitted id as 'don't
     personalize', not 'me' — they must not have the resolver attached."""
     for name in ("steam_discover", "steam_should_i_buy", "steam_recommend"):
-        fn = S.mcp._tool_manager._tools[name].fn
+        fn = S.legacy_mcp._tool_manager._tools[name].fn
         assert "default_user" not in inspect.signature(fn).parameters, name
 
 
@@ -2287,7 +2290,7 @@ def test_client_without_elicitation_capability_gets_the_old_error(monkeypatch, n
     _level_backend(monkeypatch)
 
     async def go():
-        async with Client(S.mcp) as c:
+        async with Client(S.legacy_mcp) as c:
             return await c.call_tool("steam_get_steam_level", {"params": {}})
 
     result = run(go())
@@ -2344,7 +2347,7 @@ def test_resolver_annotation_is_not_wrapped_in_a_union():
     """
     import typing
 
-    fn = S.mcp._tool_manager._tools["steam_get_wishlist"].fn
+    fn = S.legacy_mcp._tool_manager._tools["steam_get_wishlist"].fn
     hint = typing.get_type_hints(fn, include_extras=True)["default_user"]
     assert typing.get_origin(hint) is not typing.Union
     assert any(type(m).__name__ == "Resolve" for m in typing.get_args(hint)[1:])
@@ -2402,7 +2405,7 @@ def _call_with_no_key(monkeypatch, name):
     monkeypatch.setattr(S, "_http_client", lambda: None)
     S._CACHE._d.clear()
 
-    fn = S.mcp._tool_manager._tools[name].fn
+    fn = S.legacy_mcp._tool_manager._tools[name].fn
     model = list(_inspect.signature(fn, eval_str=True).parameters.values())[0].annotation
     kwargs = {f: _MINIMAL_ARGS[f] for f, i in model.model_fields.items()
               if i.is_required()}
@@ -2436,7 +2439,7 @@ def test_no_tool_is_wrongly_marked_as_needing_a_key(monkeypatch):
     sets to be precisely the ones that run without a key.
     """
     free = set()
-    for name in S.mcp._tool_manager._tools:
+    for name in S.legacy_mcp._tool_manager._tools:
         if _call_with_no_key(monkeypatch, name) is False:
             free.add(name)
         monkeypatch.undo()
@@ -2448,7 +2451,7 @@ def test_no_tool_is_wrongly_marked_as_needing_a_key(monkeypatch):
 
 
 def test_every_keyless_tool_is_registered():
-    names = {t.name for t in S.mcp._tool_manager.list_tools()}
+    names = {t.name for t in S.legacy_mcp._tool_manager.list_tools()}
     assert set(S.KEYLESS_TOOLS) <= names
     assert set(S.PARTLY_KEYLESS_TOOLS) <= names
 
@@ -2456,7 +2459,7 @@ def test_every_keyless_tool_is_registered():
 def _remark(monkeypatch, have_key):
     monkeypatch.setattr(S, "_have_api_key", lambda: have_key)
     S._compact_descriptions()
-    return {t.name: (t.description or "") for t in S.mcp._tool_manager.list_tools()}
+    return {t.name: (t.description or "") for t in S.legacy_mcp._tool_manager.list_tools()}
 
 
 def test_keyed_tools_are_marked_unavailable_without_a_key(monkeypatch):
@@ -2513,18 +2516,10 @@ def test_missing_key_error_points_at_the_keyless_alternatives(monkeypatch):
 
 
 def test_readme_key_column_matches_the_code():
-    """The README's "Needs key?" column and the runtime markers are two renderings
-    of the same fact. Drift means the docs promise something the server denies."""
+    """The compact public README table matches the registered v2 surface."""
     import pathlib
 
     readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
-    rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 44, f"parsed {len(rows)} tool rows, expected 44"
-    for name, marker in rows:
-        if marker == "no":
-            assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
-        elif marker == "no*":
-            assert name in S.PARTLY_KEYLESS_TOOLS, f"{name} documented no*, is not"
-        else:
-            assert name not in S.KEYLESS_TOOLS and name not in S.PARTLY_KEYLESS_TOOLS, (
-                f"{name} documented as needing a key, but runs without one")
+    documented = set(re.findall(r"^\| `(steam_\w+)` \|", readme, re.M))
+    registered = {tool.name for tool in Public.mcp._tool_manager.list_tools()}
+    assert documented == registered
