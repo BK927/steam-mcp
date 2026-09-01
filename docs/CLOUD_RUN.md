@@ -69,7 +69,7 @@ The script performs this sequence:
 3. Create a private worker `candidate` revision with `--no-traffic`.
 4. Grant only `steam-mcp-tasks` the worker invoker role.
 5. Create a public MCP `candidate` revision with `--no-traffic` and exact stable/candidate Host allowlists.
-6. Smoke candidate `/health` and unauthenticated rejection, then use the pinned MCP v2 client to negotiate protocol/SSE, require the exact eight-tool list with no legacy names, and complete a representative keyless `steam_game_get` call against the candidate URL.
+6. Smoke candidate `/health`, OAuth authorization/resource discovery, and unauthenticated rejection, then use the pinned MCP v2 client to negotiate protocol/SSE, require the exact eight-tool list with no legacy names, and complete a representative keyless `steam_game_get` call against the candidate URL.
 7. With `-Promote`, move the worker to 100% first and the MCP service to 100% second. Without it, both final candidates stay at 0%.
 
 On the first deployment there is no old revision to retain traffic. Cloud Run must create zero-traffic bootstrap revisions to discover stable service and tag URLs. The script requires `-Promote`, keeps bearer/IAM protection enabled, immediately replaces those bootstraps with hardened zero-traffic candidates from the same digest, smokes them, and promotes them in the same run.
@@ -103,6 +103,12 @@ Invoke-WebRequest "$baseUrl/mcp" -Method Post -Headers $headers -ContentType app
 ```
 
 The request body limit is 2 MiB. Tool results default to 12 KiB and cannot exceed 32 KiB.
+
+For ChatGPT developer-mode registration, use the production `/mcp` URL and choose OAuth. The authorization page asks for the personal key. Copy it without printing it:
+
+```powershell
+pwsh -File .\scripts\copy-chatgpt-oauth-key.ps1 -ProjectId "YOUR_PROJECT_ID"
+```
 
 ## Rollback
 

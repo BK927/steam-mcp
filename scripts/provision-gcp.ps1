@@ -11,6 +11,7 @@ param(
   [string]$QueueName = "steam-mcp-jobs",
   [string]$BucketName = "",
   [string]$JobCollection = "steam_jobs",
+  [string]$OAuthCodeCollection = "steam_oauth_codes",
   [switch]$ConfigureSteamApiKey
 )
 
@@ -180,6 +181,8 @@ Write-Host "[4/8] Creating secrets without rotating existing values..." -Foregro
 Ensure-InitialSecretValue "steam-mcp-access-token" { New-RandomHex 32 }
 Ensure-InitialSecretValue "steam-mcp-worker-token" { New-RandomHex 32 }
 Ensure-InitialSecretValue "steam-mcp-cursor-secret" { New-RandomHex 32 }
+Ensure-InitialSecretValue "steam-mcp-oauth-login-secret" { New-RandomHex 32 }
+Ensure-InitialSecretValue "steam-mcp-oauth-signing-secret" { New-RandomHex 32 }
 Ensure-Secret "steam-web-api-key"
 
 if ($ConfigureSteamApiKey) {
@@ -197,6 +200,8 @@ Grant-SecretRole "steam-mcp-worker-token" $runtimeServiceAccount
 Grant-SecretRole "steam-mcp-worker-token" $workerServiceAccount
 Grant-SecretRole "steam-mcp-cursor-secret" $runtimeServiceAccount
 Grant-SecretRole "steam-mcp-cursor-secret" $workerServiceAccount
+Grant-SecretRole "steam-mcp-oauth-login-secret" $runtimeServiceAccount
+Grant-SecretRole "steam-mcp-oauth-signing-secret" $runtimeServiceAccount
 if (Get-LatestSecretVersion "steam-web-api-key") {
   Grant-SecretRole "steam-web-api-key" $runtimeServiceAccount
   Grant-SecretRole "steam-web-api-key" $workerServiceAccount
@@ -221,6 +226,12 @@ if ($LASTEXITCODE -ne 0 -or $firestoreLocation -ne $Region) {
 }
 Invoke-Gcloud firestore fields ttls update expires_at `
   --collection-group $JobCollection `
+  --database "(default)" `
+  --enable-ttl `
+  --project $ProjectId `
+  --quiet
+Invoke-Gcloud firestore fields ttls update delete_at `
+  --collection-group $OAuthCodeCollection `
   --database "(default)" `
   --enable-ttl `
   --project $ProjectId `
@@ -297,3 +308,4 @@ Write-Host "Tasks identity:    $tasksServiceAccount"
 Write-Host "Queue:             $QueueName (rate 1/s, concurrency 2, attempts 3)"
 Write-Host "Job bucket:        $bucketUri (delete after 7 days)"
 Write-Host "Bearer token:      initialized only if absent; rotate only during deploy with -RotateAccessToken"
+Write-Host "ChatGPT OAuth:      personal login/signing secrets initialized only if absent"

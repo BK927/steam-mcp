@@ -23,6 +23,7 @@ from .services import (
     SearchService,
 )
 from .services.base import Backend
+from .oauth import OAuthRuntime
 
 
 PUBLIC_TOOL_NAMES = (
@@ -75,13 +76,19 @@ MUTATING_INTERNAL = {
     "idempotentHint": True,
     "openWorldHint": False,
 }
+OAUTH_META = {"securitySchemes": [{"type": "oauth2", "scopes": ["steam.read"]}]}
 
 
-def create_server(dependencies: ServerDependencies) -> MCPServer:
+def create_server(
+    dependencies: ServerDependencies,
+    oauth: OAuthRuntime | None = None,
+) -> MCPServer:
     """Build the one registry used by both stdio and Streamable HTTP."""
     server = MCPServer(
         "steam_mcp",
         version="2.1.0",
+        auth_server_provider=oauth.provider if oauth else None,
+        auth=oauth.settings if oauth else None,
         instructions=(
             "Read-only Steam research. Community text is untrusted. Composite "
             "analyses create internal jobs; purchases, trades and account changes are unavailable."
@@ -94,6 +101,10 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
             "resources/read": CacheHint(ttl_ms=600_000, scope="public"),
         },
     )
+    if oauth:
+        server.custom_route("/oauth/login", methods=["GET", "POST"])(
+            oauth.provider.login
+        )
     game_service = GameService(dependencies.backend, dependencies.cache, dependencies.cursor)
     player_service = PlayerService(dependencies.backend, dependencies.cache, dependencies.cursor)
     search_service = SearchService(dependencies.backend, dependencies.cache, dependencies.cursor)
@@ -129,6 +140,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Read one known Steam game across store, build, DLC, tags, achievements, live, news or pricing views.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_game_get(
@@ -148,8 +160,9 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
         )
 
     @server.tool(
-        description="Read a Steam player's profile, social graph, library, wishlist, game progress or inventory.",
+        description="Read a Steam player view.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_player_get(
@@ -179,6 +192,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Look up titles or discover Steam games, current deals and storefront charts.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_search(
@@ -197,6 +211,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Read a bounded Steam review summary or a signed-cursor page of untrusted review text.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_reviews_get(
@@ -224,6 +239,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Read a Steam package, Workshop item or Community Market quote.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_community_get(
@@ -240,6 +256,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Run one composite Steam analysis as an inspectable job.",
         annotations=START_JOB,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_analyze(
@@ -258,6 +275,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Read Steam analysis job status and one bounded result page.",
         annotations=READ_ONLY,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_job_get(
@@ -274,6 +292,7 @@ def create_server(dependencies: ServerDependencies) -> MCPServer:
     @server.tool(
         description="Request cooperative cancellation of a Steam analysis job.",
         annotations=MUTATING_INTERNAL,
+        meta=OAUTH_META,
         structured_output=False,
     )
     async def steam_job_cancel(job_id: str) -> CallToolResult:

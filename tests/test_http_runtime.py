@@ -93,6 +93,35 @@ def test_http_gateway_health_and_auth() -> None:
     assert _request(app, "/mcp", token)[0]["status"] == 204
 
 
+def test_http_gateway_serves_oauth_metadata() -> None:
+    from steam_mcp.oauth import create_oauth_runtime
+
+    oauth = create_oauth_runtime(
+        issuer="https://steam.example.run.app",
+        resource="https://steam.example.run.app/mcp",
+        scope="steam.read",
+        login_secret="l" * 32,
+        signing_secret="s" * 32,
+        access_token="a" * 32,
+        store="memory",
+        project="",
+        collection="test",
+    )
+    app = _HttpGateway(
+        _inner,
+        mcp_path="/mcp",
+        health_path="/healthz",
+        access_token="a" * 32,
+        allow_unauthenticated=False,
+        oauth=oauth,
+    )
+    response = _request(app, "/.well-known/oauth-authorization-server")
+    assert response[0]["status"] == 200
+    body = json.loads(response[1]["body"])
+    assert body["issuer"] == "https://steam.example.run.app"
+    assert body["client_id_metadata_document_supported"] is True
+
+
 def test_runtime_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLAG", "true")
     monkeypatch.setenv("COUNT", "8080")

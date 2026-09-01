@@ -12,6 +12,7 @@ param(
   [string]$QueueName = "steam-mcp-jobs",
   [string]$BucketName = "",
   [string]$JobCollection = "steam_jobs",
+  [string]$OAuthCodeCollection = "steam_oauth_codes",
   [int]$SmokeAppId = 570,
   [string]$TokenEnvironmentVariable = "STEAM_MCP_ACCESS_TOKEN",
   [switch]$RotateAccessToken,
@@ -142,6 +143,7 @@ function Deploy-WorkerCandidate {
 
 function Deploy-McpCandidate {
   param([string]$RevisionSuffix, [string]$PublicBaseUrl, [string]$AllowedHosts, [string]$WorkerEndpoint, [bool]$NoTraffic)
+  $oauthEnabled = if ([string]::IsNullOrWhiteSpace($PublicBaseUrl)) { "false" } else { "true" }
   $environmentFile = New-GcloudEnvironmentFile ([ordered]@{
     MCP_TRANSPORT = "http"
     HOST = "0.0.0.0"
@@ -151,6 +153,12 @@ function Deploy-McpCandidate {
     MCP_ALLOW_UNAUTHENTICATED = "false"
     PUBLIC_BASE_URL = $PublicBaseUrl
     MCP_ALLOWED_HOSTS = $AllowedHosts
+    MCP_OAUTH_ENABLED = $oauthEnabled
+    MCP_OAUTH_ISSUER = $PublicBaseUrl
+    MCP_OAUTH_RESOURCE = "$PublicBaseUrl/mcp"
+    MCP_OAUTH_SCOPE = "steam.read"
+    MCP_OAUTH_STORE = "firestore"
+    MCP_OAUTH_CODE_COLLECTION = $OAuthCodeCollection
     STEAM_PROCESS_ROLE = "mcp"
     STEAM_JOB_BACKEND = "gcp"
     GCP_PROJECT = $ProjectId
@@ -164,7 +172,7 @@ function Deploy-McpCandidate {
     STEAM_CURSOR_TTL_SECONDS = "86400"
     STEAM_MAX_RESULT_BYTES = "12288"
   })
-  $secretValues = "MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion,STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
+  $secretValues = "MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion,MCP_OAUTH_LOGIN_SECRET=steam-mcp-oauth-login-secret:$oauthLoginVersion,MCP_OAUTH_SIGNING_SECRET=steam-mcp-oauth-signing-secret:$oauthSigningVersion,STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
   if ($steamApiVersion) { $secretValues += ",STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
   $arguments = @(
     "run", "deploy", $ServiceName, "--project", $ProjectId, "--region", $Region,
@@ -216,6 +224,8 @@ if ($RotateAccessToken) { Add-SecretVersion "steam-mcp-access-token" (New-Random
 $accessVersion = Get-LatestSecretVersion "steam-mcp-access-token"
 $workerTokenVersion = Get-LatestSecretVersion "steam-mcp-worker-token"
 $cursorSecretVersion = Get-LatestSecretVersion "steam-mcp-cursor-secret"
+$oauthLoginVersion = Get-LatestSecretVersion "steam-mcp-oauth-login-secret"
+$oauthSigningVersion = Get-LatestSecretVersion "steam-mcp-oauth-signing-secret"
 $steamApiVersion = Get-LatestSecretVersion "steam-web-api-key" $false
 
 Write-Host "[1/7] Building immutable image $taggedImage..." -ForegroundColor Cyan
@@ -276,6 +286,12 @@ Write-Host "[5/7] Smoking /health, bearer enforcement, and the eight-tool contra
 $health = Invoke-RestMethod -Uri "$candidateUrl/health" -Method Get
 if (-not $health.ok) { throw "Candidate health response did not report ok=true." }
 Test-HttpStatus "$candidateUrl/mcp" 401
+$oauthMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-authorization-server" -Method Get
+if ($oauthMetadata.issuer -ne $serviceUrl -or -not $oauthMetadata.client_id_metadata_document_supported) {
+  throw "Candidate OAuth authorization metadata is invalid."
+}
+$resourceMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-protected-resource/mcp" -Method Get
+if ($resourceMetadata.resource -ne "$serviceUrl/mcp") { throw "Candidate OAuth resource metadata is invalid." }
 $accessToken = (@(& gcloud secrets versions access $accessVersion --secret steam-mcp-access-token --project $ProjectId) -join "").Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) { throw "Could not read the pinned bearer secret version." }
 $priorSmokeToken = $env:MCP_SMOKE_ACCESS_TOKEN
@@ -320,4 +336,6 @@ Write-Host "Health:      $serviceUrl/health"
 Write-Host "Access sec:  steam-mcp-access-token:$accessVersion"
 Write-Host "Worker sec:  steam-mcp-worker-token:$workerTokenVersion"
 Write-Host "Cursor sec:  steam-mcp-cursor-secret:$cursorSecretVersion"
+Write-Host "OAuth login: steam-mcp-oauth-login-secret:$oauthLoginVersion"
+Write-Host "OAuth sign:  steam-mcp-oauth-signing-secret:$oauthSigningVersion"
 if ($steamApiVersion) { Write-Host "Steam API:   steam-web-api-key:$steamApiVersion" }

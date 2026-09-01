@@ -63,7 +63,7 @@ python -m venv .venv
 The production topology keeps Steam and YouTube as separate services and plugins. Steam uses one image for both roles:
 
 ```text
-Codex -> public steam-mcp (/mcp, bearer)
+Codex/ChatGPT -> public steam-mcp (/mcp, bearer or OAuth 2.1)
                      |
                      +-> Cloud Tasks (1 task/s, concurrency 2, attempts 3)
                               |
@@ -79,7 +79,7 @@ pwsh -File .\scripts\provision-gcp.ps1 -ProjectId "YOUR_PROJECT_ID"
 pwsh -File .\scripts\deploy-cloud-run.ps1 -ProjectId "YOUR_PROJECT_ID" -Promote
 ```
 
-Later deployments build `REGION-docker.pkg.dev/PROJECT/mcp/steam-mcp:GIT_SHA`, resolve its registry digest, create tagged zero-traffic candidates, smoke the public contract, and promote only when `-Promote` is present. Bearer rotation occurs only with `-RotateAccessToken`. See [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md).
+Later deployments build `REGION-docker.pkg.dev/PROJECT/mcp/steam-mcp:GIT_SHA`, resolve its registry digest, create tagged zero-traffic candidates, smoke the public and OAuth discovery contracts, and promote only when `-Promote` is present. Bearer rotation occurs only with `-RotateAccessToken`. ChatGPT uses Authorization Code + PKCE with a private personal access key; Codex can continue using the existing bearer. See [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md).
 
 Cloud plugin configuration lives in `.mcp.json`; local and cloud profiles are both supported by `scripts/sync-codex-plugin.ps1`. That synchronization script changes the user's plugin installation, so it is not part of tests or deployment.
 
@@ -94,6 +94,10 @@ Hosts that implement OpenAI [Tool Search](https://developers.openai.com/api/docs
 | `HEALTH_PATH` | `/healthz` locally; `/health` on Cloud Run | Public liveness path |
 | `HTTP_MAX_BODY_BYTES` | `2097152` | Maximum HTTP request body (2 MiB) |
 | `MCP_ACCESS_TOKEN` | empty | Required bearer secret in HTTP mode |
+| `MCP_OAUTH_ENABLED` | `false` | Enable personal ChatGPT OAuth 2.1 endpoints |
+| `MCP_OAUTH_LOGIN_SECRET` | empty | Private key entered only on the hosted authorization page |
+| `MCP_OAUTH_SIGNING_SECRET` | empty | Signs audience-bound access and refresh tokens |
+| `MCP_OAUTH_STORE` | `memory` | Cloud deployment uses Firestore for one-time codes |
 | `PUBLIC_BASE_URL` | empty | Stable service URL used for Host validation |
 | `MCP_ALLOWED_HOSTS` | empty | Additional exact Host values, including candidate tag URL |
 | `STEAM_API_KEY` | empty | Optional Steam Web API key |
@@ -110,7 +114,7 @@ See [.env.example](.env.example) for the full GCP job adapter variables.
 ## Security boundary
 
 - Every public tool is read-only. It does not trade, buy, post, launch games, or modify Steam accounts.
-- `/mcp` uses a fixed bearer token intended for a private single-operator plugin. It is not a multi-user OAuth authorization server.
+- `/mcp` accepts the existing fixed bearer and personal OAuth 2.1 tokens. OAuth is limited to ChatGPT client metadata URLs, PKCE S256, the exact MCP audience, and a private operator key; it is not a general multi-user identity system.
 - The worker has no unauthenticated Cloud Run invoker. Cloud Tasks uses an OIDC identity; the optional worker header token is defense in depth.
 - Secrets are injected from service-specific Secret Manager IAM bindings using numeric versions, never `latest`.
 - Outbound requests remain restricted to known Steam-related hosts.

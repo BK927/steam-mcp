@@ -15,6 +15,7 @@ from .cache import TtlLruCache
 from .cloud_jobs import CloudTasksJobRunner, FirestoreJobStore, GcsResultStore
 from .cursor import CursorCodec
 from .jobs import InlineJobRunner, MemoryJobStore, MemoryResultStore
+from .oauth import OAuthRuntime, create_oauth_runtime
 from .public_server import ServerDependencies, create_server
 from .services.base import FunctionBackend, OperationBinding
 
@@ -159,10 +160,32 @@ def _transport_security(host: str) -> Any:
     )
 
 
+def _oauth_from_env(access_token: str) -> OAuthRuntime | None:
+    if not _read_bool_env("MCP_OAUTH_ENABLED", False):
+        return None
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base_url:
+        raise RuntimeError("OAuth requires PUBLIC_BASE_URL")
+    mcp_path = _read_path_env("MCP_PATH", "/mcp")
+    return create_oauth_runtime(
+        issuer=os.getenv("MCP_OAUTH_ISSUER", public_base_url).strip(),
+        resource=os.getenv("MCP_OAUTH_RESOURCE", f"{public_base_url}{mcp_path}").strip(),
+        scope=os.getenv("MCP_OAUTH_SCOPE", "steam.read").strip(),
+        login_secret=os.getenv("MCP_OAUTH_LOGIN_SECRET", "").strip(),
+        signing_secret=os.getenv("MCP_OAUTH_SIGNING_SECRET", "").strip(),
+        access_token=access_token,
+        store=os.getenv("MCP_OAUTH_STORE", "memory").strip().lower(),
+        project=os.getenv("GCP_PROJECT", "").strip(),
+        collection=os.getenv("MCP_OAUTH_CODE_COLLECTION", "steam_oauth_codes").strip(),
+    )
+
+
 # Construct the shared registry only after every environment parser used by the
 # dependency factory has been defined. This matters for the Cloud-only GCP job
 # branch, which reads its TTL and result-size settings during import.
-mcp = create_server(_public_dependencies())
+_access_token = os.getenv("MCP_ACCESS_TOKEN", "").strip()
+_oauth = _oauth_from_env(_access_token)
+mcp = create_server(_public_dependencies(), _oauth)
 
 
 class _HttpGateway:
@@ -176,12 +199,14 @@ class _HttpGateway:
         health_path: str,
         access_token: str,
         allow_unauthenticated: bool,
+        oauth: OAuthRuntime | None = None,
     ) -> None:
         self.app = app
         self.mcp_path = mcp_path
         self.health_path = health_path
         self.access_token = access_token
         self.allow_unauthenticated = allow_unauthenticated
+        self.oauth = oauth
 
     @staticmethod
     def _headers(scope: dict[str, Any]) -> dict[bytes, bytes]:
@@ -240,11 +265,52 @@ class _HttpGateway:
                     "transport": "streamable-http",
                     "mcpPath": self.mcp_path,
                     "readOnly": True,
+                    "authentication": "oauth2+static-bearer" if self.oauth else (
+                        "static-bearer" if self.access_token else "none"
+                    ),
                 },
                 head=method == "HEAD",
             )
             return
-        if path in {self.mcp_path, f"{self.mcp_path}/"} and not self._authorized(scope):
+        if (
+            self.oauth
+            and path == "/.well-known/oauth-authorization-server"
+            and method in {"GET", "HEAD"}
+        ):
+            await self._json_response(
+                send,
+                200,
+                self.oauth.provider.authorization_metadata(),
+                head=method == "HEAD",
+            )
+            return
+        if (
+            self.oauth
+            and path
+            in {
+                "/.well-known/oauth-protected-resource",
+                f"/.well-known/oauth-protected-resource{self.mcp_path}",
+            }
+            and method in {"GET", "HEAD"}
+        ):
+            await self._json_response(
+                send,
+                200,
+                {
+                    "resource": self.oauth.provider.resource,
+                    "authorization_servers": [self.oauth.provider.issuer],
+                    "scopes_supported": [self.oauth.provider.scope],
+                    "bearer_methods_supported": ["header"],
+                    "resource_name": "Steam MCP",
+                },
+                head=method == "HEAD",
+            )
+            return
+        if (
+            not self.oauth
+            and path in {self.mcp_path, f"{self.mcp_path}/"}
+            and not self._authorized(scope)
+        ):
             await self._json_response(
                 send,
                 401,
@@ -283,12 +349,13 @@ def _build_http_app() -> tuple[Any, str, int]:
                 health_path=health_path,
                 access_token=access_token,
                 allow_unauthenticated=True,
+                oauth=None,
             ),
             host,
             port,
         )
 
-    if not allow_unauthenticated and len(access_token) < 32:
+    if not allow_unauthenticated and not _oauth and len(access_token) < 32:
         raise RuntimeError(
             "HTTP mode requires MCP_ACCESS_TOKEN with at least 32 characters, "
             "unless MCP_ALLOW_UNAUTHENTICATED=true"
@@ -309,6 +376,7 @@ def _build_http_app() -> tuple[Any, str, int]:
             health_path=health_path,
             access_token=access_token,
             allow_unauthenticated=allow_unauthenticated,
+            oauth=_oauth,
         ),
         host,
         port,
