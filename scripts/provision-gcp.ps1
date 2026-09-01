@@ -71,12 +71,13 @@ function Ensure-Secret {
 
 function Get-LatestSecretVersion {
   param([string]$Name)
-  $raw = (& gcloud secrets versions list $Name `
+  $raw = [string](& gcloud secrets versions list $Name `
     --project $ProjectId `
     --filter "state=ENABLED" `
     --sort-by "~createTime" `
     --limit 1 `
-    --format "value(name)").Trim()
+    --format "value(name)")
+  $raw = $raw.Trim()
   if ($LASTEXITCODE -ne 0) {
     throw "Could not list Secret Manager versions for '$Name'."
   }
