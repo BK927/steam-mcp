@@ -225,7 +225,7 @@ Write-Host "[2/7] Deploying the private worker candidate..." -ForegroundColor Cy
 $workerUrl = ""
 if ($workerExists) { $workerUrl = [string](Get-ServiceDocument $WorkerServiceName).status.url }
 if (-not $workerUrl) {
-  Deploy-WorkerCandidate "$shortSha-worker-bootstrap-$revisionNonce" "" $true
+  Deploy-WorkerCandidate "$shortSha-worker-bootstrap-$revisionNonce" "" $workerExists
   $workerUrl = [string](Get-ServiceDocument $WorkerServiceName).status.url
 }
 $workerEndpoint = "$workerUrl/internal/jobs/run"
@@ -245,7 +245,7 @@ if ($mcpExists) {
 }
 if (-not $candidateUrl) {
   $bootstrapHosts = if ($serviceUrl) { ([Uri]$serviceUrl).Host } else { "" }
-  Deploy-McpCandidate "$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $true
+  Deploy-McpCandidate "$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $mcpExists
   $serviceDocument = Get-ServiceDocument $ServiceName
   $serviceUrl = [string]$serviceDocument.status.url
   $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"

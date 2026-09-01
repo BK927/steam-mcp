@@ -70,6 +70,8 @@ assert "--no-traffic" in deployment and "candidate=100" in deployment
 assert 'HTTP_MAX_BODY_BYTES = "2097152"' in deployment
 assert 'STEAM_MAX_RESULT_BYTES = "12288"' in deployment
 assert '"--env-vars-file", $environmentFile' in deployment
+assert '"$shortSha-worker-bootstrap-$revisionNonce" "" $workerExists' in deploy
+assert '"$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $mcpExists' in deploy
 assert "STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion" in deployment
 
 print("Steam compact release contract passed.")
