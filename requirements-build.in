@@ -1,2 +1,5 @@
-# The project build backend is installed from the same hash-locked runtime set.
+# The project build backend and its editable-install helper are installed from
+# the same hash-locked runtime set. CI installs the project with ``-e`` while
+# build isolation is disabled, so Hatch cannot fetch this optional helper.
 hatchling
+editables
