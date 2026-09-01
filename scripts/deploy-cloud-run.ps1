@@ -89,43 +89,87 @@ function Get-TaggedRevision {
   return [string]$match[0].revisionName
 }
 
+function New-GcloudEnvironmentFile {
+  param([System.Collections.IDictionary]$Values)
+  $path = Join-Path ([IO.Path]::GetTempPath()) ("steam-mcp-env-{0}.json" -f [Guid]::NewGuid().ToString("N"))
+  $json = $Values | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
+  return $path
+}
+
 function Deploy-WorkerCandidate {
   param([string]$RevisionSuffix, [string]$WorkerEndpoint, [bool]$NoTraffic)
-  $envValues = "^@^MCP_TRANSPORT=http@HOST=0.0.0.0@PORT=8080@HEALTH_PATH=/healthz@STEAM_PROCESS_ROLE=worker@STEAM_JOB_BACKEND=gcp@GCP_PROJECT=$ProjectId@GCP_LOCATION=$Region@STEAM_JOB_BUCKET=$BucketName@STEAM_JOB_COLLECTION=$JobCollection@STEAM_JOB_TTL_SECONDS=604800"
-  $secretValues = "^@^STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion@STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
-  if ($steamApiVersion) { $secretValues += "@STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
+  $environmentFile = New-GcloudEnvironmentFile ([ordered]@{
+    MCP_TRANSPORT = "http"
+    HOST = "0.0.0.0"
+    PORT = "8080"
+    HEALTH_PATH = "/healthz"
+    STEAM_PROCESS_ROLE = "worker"
+    STEAM_JOB_BACKEND = "gcp"
+    GCP_PROJECT = $ProjectId
+    GCP_LOCATION = $Region
+    STEAM_JOB_BUCKET = $BucketName
+    STEAM_JOB_COLLECTION = $JobCollection
+    STEAM_JOB_TTL_SECONDS = "604800"
+  })
+  $secretValues = "STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
+  if ($steamApiVersion) { $secretValues += ",STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
   $arguments = @(
     "run", "deploy", $WorkerServiceName, "--project", $ProjectId, "--region", $Region,
     "--image", $immutableImage, "--no-allow-unauthenticated", "--ingress", "all",
     "--execution-environment", "gen2", "--service-account", $workerServiceAccount,
     "--port", "8080", "--cpu", "1", "--memory", "1Gi", "--concurrency", "1",
     "--timeout", "1800", "--min-instances", "0", "--max-instances", "2",
-    "--set-env-vars", $envValues, "--set-secrets", $secretValues,
+    "--env-vars-file", $environmentFile, "--set-secrets", $secretValues,
     "--revision-suffix", $RevisionSuffix, "--tag", "candidate",
     "--labels", "app=steam-mcp-worker,git-sha=$shortSha", "--quiet"
   )
   if ($WorkerEndpoint) { $arguments += @("--add-custom-audiences", $WorkerEndpoint) }
   if ($NoTraffic) { $arguments += "--no-traffic" }
-  Invoke-Gcloud @arguments
+  try { Invoke-Gcloud @arguments }
+  finally { Remove-Item -LiteralPath $environmentFile -Force -ErrorAction SilentlyContinue }
 }
 
 function Deploy-McpCandidate {
   param([string]$RevisionSuffix, [string]$PublicBaseUrl, [string]$AllowedHosts, [string]$WorkerEndpoint, [bool]$NoTraffic)
-  $envValues = "^@^MCP_TRANSPORT=http@HOST=0.0.0.0@PORT=8080@MCP_PATH=/mcp@HEALTH_PATH=/healthz@HTTP_MAX_BODY_BYTES=2097152@MCP_ALLOW_UNAUTHENTICATED=false@PUBLIC_BASE_URL=$PublicBaseUrl@MCP_ALLOWED_HOSTS=$AllowedHosts@STEAM_PROCESS_ROLE=mcp@STEAM_JOB_BACKEND=gcp@GCP_PROJECT=$ProjectId@GCP_LOCATION=$Region@STEAM_JOB_QUEUE=$QueueName@STEAM_JOB_WORKER_URL=$WorkerEndpoint@STEAM_JOB_WORKER_SERVICE_ACCOUNT=$tasksServiceAccount@STEAM_JOB_BUCKET=$BucketName@STEAM_JOB_COLLECTION=$JobCollection@STEAM_JOB_TTL_SECONDS=604800@STEAM_CURSOR_TTL_SECONDS=86400@STEAM_MAX_RESULT_BYTES=12288"
-  $secretValues = "^@^MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion@STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion@STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
-  if ($steamApiVersion) { $secretValues += "@STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
+  $environmentFile = New-GcloudEnvironmentFile ([ordered]@{
+    MCP_TRANSPORT = "http"
+    HOST = "0.0.0.0"
+    PORT = "8080"
+    MCP_PATH = "/mcp"
+    HEALTH_PATH = "/healthz"
+    HTTP_MAX_BODY_BYTES = "2097152"
+    MCP_ALLOW_UNAUTHENTICATED = "false"
+    PUBLIC_BASE_URL = $PublicBaseUrl
+    MCP_ALLOWED_HOSTS = $AllowedHosts
+    STEAM_PROCESS_ROLE = "mcp"
+    STEAM_JOB_BACKEND = "gcp"
+    GCP_PROJECT = $ProjectId
+    GCP_LOCATION = $Region
+    STEAM_JOB_QUEUE = $QueueName
+    STEAM_JOB_WORKER_URL = $WorkerEndpoint
+    STEAM_JOB_WORKER_SERVICE_ACCOUNT = $tasksServiceAccount
+    STEAM_JOB_BUCKET = $BucketName
+    STEAM_JOB_COLLECTION = $JobCollection
+    STEAM_JOB_TTL_SECONDS = "604800"
+    STEAM_CURSOR_TTL_SECONDS = "86400"
+    STEAM_MAX_RESULT_BYTES = "12288"
+  })
+  $secretValues = "MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion,STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
+  if ($steamApiVersion) { $secretValues += ",STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
   $arguments = @(
     "run", "deploy", $ServiceName, "--project", $ProjectId, "--region", $Region,
     "--image", $immutableImage, "--allow-unauthenticated", "--ingress", "all",
     "--execution-environment", "gen2", "--service-account", $runtimeServiceAccount,
     "--port", "8080", "--cpu", "1", "--memory", "512Mi", "--concurrency", "10",
     "--timeout", "300", "--min-instances", "0", "--max-instances", "1",
-    "--set-env-vars", $envValues, "--set-secrets", $secretValues,
+    "--env-vars-file", $environmentFile, "--set-secrets", $secretValues,
     "--revision-suffix", $RevisionSuffix, "--tag", "candidate",
     "--labels", "app=steam-mcp,git-sha=$shortSha", "--quiet"
   )
   if ($NoTraffic) { $arguments += "--no-traffic" }
-  Invoke-Gcloud @arguments
+  try { Invoke-Gcloud @arguments }
+  finally { Remove-Item -LiteralPath $environmentFile -Force -ErrorAction SilentlyContinue }
 }
 
 function Test-HttpStatus {
