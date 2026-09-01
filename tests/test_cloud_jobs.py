@@ -403,6 +403,6 @@ def test_firestore_emulator_idempotency_transition_and_restart_recovery() -> Non
         assert final is not None and final.status == "succeeded"
         assert final.result_ref == "gs://bucket/steam-jobs/job/result.jsonl.gz"
         await client.collection(collection).document(job.job_id).delete()
-        await client.close()
+        client.close()
 
     run(exercise())
