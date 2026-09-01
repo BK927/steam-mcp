@@ -74,7 +74,10 @@ function Get-TaggedUrl {
   $entries = @()
   if ($Document.status.PSObject.Properties.Name -contains "traffic") { $entries += @($Document.status.traffic) }
   if ($Document.status.PSObject.Properties.Name -contains "trafficStatuses") { $entries += @($Document.status.trafficStatuses) }
-  $match = @($entries | Where-Object { $_.tag -eq $Tag -and $_.url } | Select-Object -First 1)
+  $match = @($entries | Where-Object {
+      $_.PSObject.Properties["tag"] -and $_.tag -eq $Tag -and
+      $_.PSObject.Properties["url"] -and $_.url
+    } | Select-Object -First 1)
   if ($match.Count -eq 0) { return $null }
   return [string]$match[0].url
 }
@@ -84,7 +87,10 @@ function Get-TaggedRevision {
   $entries = @()
   if ($Document.status.PSObject.Properties.Name -contains "traffic") { $entries += @($Document.status.traffic) }
   if ($Document.status.PSObject.Properties.Name -contains "trafficStatuses") { $entries += @($Document.status.trafficStatuses) }
-  $match = @($entries | Where-Object { $_.tag -eq $Tag -and $_.revisionName } | Select-Object -First 1)
+  $match = @($entries | Where-Object {
+      $_.PSObject.Properties["tag"] -and $_.tag -eq $Tag -and
+      $_.PSObject.Properties["revisionName"] -and $_.revisionName
+    } | Select-Object -First 1)
   if ($match.Count -eq 0) { return $null }
   return [string]$match[0].revisionName
 }
