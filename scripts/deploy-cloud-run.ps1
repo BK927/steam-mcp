@@ -46,7 +46,7 @@ function Get-LatestSecretVersion {
     if ($Required) { throw "Missing secret '$Name'. Run provision-gcp.ps1 first." }
     return $null
   }
-  $raw = [string](& gcloud secrets versions list $Name --project $ProjectId --filter "state=ENABLED" --sort-by "~createTime" --limit 1 --format "value(name)")
+  $raw = @(& gcloud secrets versions list $Name --project $ProjectId --filter "state=ENABLED" --sort-by "~createTime" --limit 1 --format "value(name)") -join ""
   $raw = $raw.Trim()
   if ($LASTEXITCODE -ne 0) { throw "Could not list versions for '$Name'." }
   if ([string]::IsNullOrWhiteSpace($raw)) {
