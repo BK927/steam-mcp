@@ -298,6 +298,10 @@ Steam tools appear. Running from a source checkout instead? Use
 
 ## Security
 
+### Remote deployment
+
+The default remains local stdio. For a private remote Codex plugin, this repository also supports stateless Streamable HTTP at `/mcp`, bearer-token protection, and Google Cloud Run deployment. See [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md).
+
 Read-only, official-Steam-only, and bring-your-own-key. In short:
 
 - **Read-only** — never writes, trades, posts, launches games, or buys anything.
