@@ -102,7 +102,6 @@ function Deploy-WorkerCandidate {
   $environmentFile = New-GcloudEnvironmentFile ([ordered]@{
     MCP_TRANSPORT = "http"
     HOST = "0.0.0.0"
-    PORT = "8080"
     HEALTH_PATH = "/healthz"
     STEAM_PROCESS_ROLE = "worker"
     STEAM_JOB_BACKEND = "gcp"
@@ -135,7 +134,6 @@ function Deploy-McpCandidate {
   $environmentFile = New-GcloudEnvironmentFile ([ordered]@{
     MCP_TRANSPORT = "http"
     HOST = "0.0.0.0"
-    PORT = "8080"
     MCP_PATH = "/mcp"
     HEALTH_PATH = "/healthz"
     HTTP_MAX_BODY_BYTES = "2097152"
