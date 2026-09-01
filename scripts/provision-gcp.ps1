@@ -89,13 +89,18 @@ function Get-LatestSecretVersion {
 
 function Add-SecretVersion {
   param([string]$Name, [string]$Value)
-  $Value | & gcloud secrets versions add $Name `
-    --project $ProjectId `
-    --data-file=- `
-    --quiet
-  if ($LASTEXITCODE -ne 0) {
-    throw "Could not add a Secret Manager version for '$Name'."
+  $path = Join-Path ([IO.Path]::GetTempPath()) ("steam-mcp-secret-{0}" -f [Guid]::NewGuid().ToString("N"))
+  try {
+    [IO.File]::WriteAllText($path, $Value, [Text.UTF8Encoding]::new($false))
+    & gcloud secrets versions add $Name `
+      --project $ProjectId `
+      --data-file=$path `
+      --quiet
+    if ($LASTEXITCODE -ne 0) {
+      throw "Could not add a Secret Manager version for '$Name'."
+    }
   }
+  finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
 }
 
 function Ensure-InitialSecretValue {

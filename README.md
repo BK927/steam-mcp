@@ -91,7 +91,7 @@ Hosts that implement OpenAI [Tool Search](https://developers.openai.com/api/docs
 | --- | --- | --- |
 | `MCP_TRANSPORT` | `stdio` | `stdio` locally, `http` on Cloud Run |
 | `MCP_PATH` | `/mcp` | Streamable HTTP MCP path |
-| `HEALTH_PATH` | `/healthz` | Public liveness path |
+| `HEALTH_PATH` | `/healthz` locally; `/health` on Cloud Run | Public liveness path |
 | `HTTP_MAX_BODY_BYTES` | `2097152` | Maximum HTTP request body (2 MiB) |
 | `MCP_ACCESS_TOKEN` | empty | Required bearer secret in HTTP mode |
 | `PUBLIC_BASE_URL` | empty | Stable service URL used for Host validation |

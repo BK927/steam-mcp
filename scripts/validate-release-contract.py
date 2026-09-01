@@ -66,7 +66,9 @@ assert "$RotateAccessToken" in deployment
 assert deploy.count('Add-SecretVersion "steam-mcp-access-token"') == 1
 assert 'if ($RotateAccessToken) { Add-SecretVersion "steam-mcp-access-token"' in deploy
 assert 'Add-SecretVersion "steam-mcp-access-token"' not in provision
-assert "--no-traffic" in deployment and "candidate=100" in deployment
+assert "--no-traffic" in deployment and '"$mcpRevision=100"' in deployment
+assert '"$workerRevision=100"' in deployment and "--to-tags" not in deployment
+assert 'HEALTH_PATH = "/health"' in deployment
 assert 'HTTP_MAX_BODY_BYTES = "2097152"' in deployment
 assert 'STEAM_MAX_RESULT_BYTES = "12288"' in deployment
 assert '"--env-vars-file", $environmentFile' in deployment

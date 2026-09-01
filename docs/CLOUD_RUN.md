@@ -13,7 +13,7 @@ This is the production profile for Steam MCP 2.1.0. It preserves local stdio but
 | Firestore | `(default)` / `steam_jobs` | Native mode, `asia-northeast1` | runtime and worker identities |
 | Cloud Storage | `PROJECT-steam-mcp-jobs` | `asia-northeast1`, uniform access, public access prevention | runtime read; worker object admin |
 
-The container image is identical for the MCP and worker services. `STEAM_PROCESS_ROLE=mcp|worker` selects the entrypoint behavior. The worker exposes only `/healthz` and `POST /internal/jobs/run`; it does not expose `/mcp`.
+The container image is identical for the MCP and worker services. `STEAM_PROCESS_ROLE=mcp|worker` selects the entrypoint behavior. The Cloud Run profile exposes `/health` for liveness; local defaults remain `/healthz`. The worker also exposes `POST /internal/jobs/run`; it does not expose `/mcp`.
 
 Firestore stores job state and an `expires_at` Timestamp. Its TTL policy removes expired job documents asynchronously. Cloud Storage deletes result objects when their age reaches seven days. The application sets cloud job expiry to 604,800 seconds; TTL deletion is not an immediate scheduling guarantee.
 
@@ -69,7 +69,7 @@ The script performs this sequence:
 3. Create a private worker `candidate` revision with `--no-traffic`.
 4. Grant only `steam-mcp-tasks` the worker invoker role.
 5. Create a public MCP `candidate` revision with `--no-traffic` and exact stable/candidate Host allowlists.
-6. Smoke candidate `/healthz` and unauthenticated rejection, then use the pinned MCP v2 client to negotiate protocol/SSE, require the exact eight-tool list with no legacy names, and complete a representative keyless `steam_game_get` call against the candidate URL.
+6. Smoke candidate `/health` and unauthenticated rejection, then use the pinned MCP v2 client to negotiate protocol/SSE, require the exact eight-tool list with no legacy names, and complete a representative keyless `steam_game_get` call against the candidate URL.
 7. With `-Promote`, move the worker to 100% first and the MCP service to 100% second. Without it, both final candidates stay at 0%.
 
 On the first deployment there is no old revision to retain traffic. Cloud Run must create zero-traffic bootstrap revisions to discover stable service and tag URLs. The script requires `-Promote`, keeps bearer/IAM protection enabled, immediately replaces those bootstraps with hardened zero-traffic candidates from the same digest, smokes them, and promotes them in the same run.
@@ -91,7 +91,7 @@ The deploy script already checks the candidate. After promotion:
 
 ```powershell
 $baseUrl = "https://YOUR_STEAM_SERVICE.run.app"
-Invoke-RestMethod "$baseUrl/healthz"
+Invoke-RestMethod "$baseUrl/health"
 
 $headers = @{
   Authorization = "Bearer $env:STEAM_MCP_ACCESS_TOKEN"
