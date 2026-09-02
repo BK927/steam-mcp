@@ -157,12 +157,14 @@ class FakeBlob:
         self.body = b""
         self.content_type = ""
         self.content_encoding: str | None = None
+        self.raw_download = False
 
     def upload_from_string(self, body: bytes, *, content_type: str) -> None:
         self.body = body
         self.content_type = content_type
 
-    def download_as_bytes(self) -> bytes:
+    def download_as_bytes(self, *, raw_download: bool = False) -> bytes:
+        self.raw_download = raw_download
         return self.body
 
 
@@ -194,6 +196,7 @@ def test_gcs_result_exact_gzip_jsonl_path_and_roundtrip() -> None:
     assert blob.content_type == "application/x-ndjson"
     assert json.loads(gzip.decompress(blob.body).decode().strip()) == value
     assert run(store.get(ref)) == value
+    assert blob.raw_download is True
 
 
 class FakeTasks:

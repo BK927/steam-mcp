@@ -273,7 +273,13 @@ class GcsResultStore:
         if not result_ref.startswith(prefix) or not result_ref.endswith(suffix):
             raise ServiceError(ErrorCode.JOB_EXPIRED, "The result reference is invalid.")
         job_id = result_ref[len(prefix):-len(suffix)]
-        raw = await asyncio.to_thread(self._blob(job_id).download_as_bytes)
+        # The object is already gzip-compressed and marked Content-Encoding:
+        # gzip. Cloud Storage otherwise transparently decompresses it, which
+        # would make the explicit gzip.decompress below process plain JSON.
+        raw = await asyncio.to_thread(
+            self._blob(job_id).download_as_bytes,
+            raw_download=True,
+        )
         rows = [
             json.loads(line)
             for line in gzip.decompress(raw).decode("utf-8").splitlines()
