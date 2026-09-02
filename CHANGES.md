@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [2.1.1] — ChatGPT OAuth redirect hotfix
+- Allowed the exact ChatGPT callback origin in the login page form policy so Chrome can follow the successful authorization redirect.
+
 ## [2.1.0] — Patch B: managed cloud jobs
 - Added the GCP job adapter: Cloud Tasks OIDC dispatch to a private same-image worker, Firestore job state, and seven-day Cloud Storage results.
 - Added SHA-tag/digest-pinned candidate Cloud Run rollout, explicit bearer rotation, numeric secret versions, smoke gates, promotion, and paired rollback.

@@ -125,6 +125,33 @@ def test_personal_login_issues_one_time_audience_bound_token() -> None:
     assert asyncio.run(provider.load_authorization_code(client, code)) is None
 
 
+def test_login_page_allows_the_chatgpt_callback_redirect() -> None:
+    runtime = _runtime()
+    provider = runtime.provider
+    client = asyncio.run(provider.get_client(CHATGPT_STABLE_CLIENT_ID))
+    assert client is not None
+    login_url = asyncio.run(
+        provider.authorize(
+            client,
+            AuthorizationParams(
+                state="opaque-state",
+                scopes=["steam.read"],
+                code_challenge="x" * 43,
+                redirect_uri=AnyUrl(CHATGPT_STABLE_REDIRECT_URI),
+                redirect_uri_provided_explicitly=True,
+                resource=RESOURCE,
+            ),
+        )
+    )
+
+    response = asyncio.run(provider.login(_request("GET", login_url)))
+
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    assert "form-action 'self' https://chatgpt.com" in csp
+    assert "form-action *" not in csp
+
+
 def test_login_rejects_wrong_secret_without_consuming_transaction() -> None:
     runtime = _runtime()
     provider = runtime.provider

@@ -86,7 +86,7 @@ def create_server(
     """Build the one registry used by both stdio and Streamable HTTP."""
     server = MCPServer(
         "steam_mcp",
-        version="2.1.0",
+        version="2.1.1",
         auth_server_provider=oauth.provider if oauth else None,
         auth=oauth.settings if oauth else None,
         instructions=(
@@ -368,7 +368,7 @@ def _compact_tool_schemas(server: MCPServer) -> None:
 def _catalog(status: dict[str, Any]) -> dict[str, Any]:
     value = {
         "schema_version": "1",
-        "server_version": "2.1.0",
+        "server_version": "2.1.1",
         "tools": list(PUBLIC_TOOL_NAMES),
         "game_views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"],
         "player_views": ["profile", "social", "library", "wishlist", "progress", "inventory"],

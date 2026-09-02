@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "steam-mcp",
   "display_name": "Steam (read-only)",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "icon": "icon.png",
   "description": "Read-only Steam research through 8 compact game, player, review, community, search, and job tools.",
   "long_description": "A read-only Model Context Protocol server for Valve's public Steam APIs plus a disclosed, keyless community mirror of current public SteamCMD AppInfo. Eight compact tools cover store data, reviews, prices, tags, live players, current builds, public player data, libraries, achievements, community data, and bounded analysis jobs. The server never scrapes SteamDB and never writes, trades, posts, launches games, or makes purchases.\n\nA free Steam Web API key is optional and is only needed for account-specific views and personalization. Friends lists, owned games, and achievements are visible only when the target Steam profile's relevant privacy setting is Public.",

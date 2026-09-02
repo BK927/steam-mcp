@@ -291,7 +291,10 @@ class PersonalOAuthProvider:
             status_code=401 if error else 200,
             headers={
                 "Cache-Control": "no-store",
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+                # Chrome applies form-action to redirects after a form POST. The
+                # successful login response redirects to ChatGPT's OAuth
+                # callback, so that origin must be allowed explicitly.
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'",
                 "Referrer-Policy": "no-referrer",
                 "X-Content-Type-Options": "nosniff",
             },

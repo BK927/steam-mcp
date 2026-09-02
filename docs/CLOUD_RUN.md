@@ -1,6 +1,6 @@
 # Steam MCP on Google Cloud Run
 
-This is the production profile for Steam MCP 2.1.0. It preserves local stdio but uses managed Google Cloud state for remote work. No deployment has been executed from this repository as part of the refactor.
+This is the production profile for Steam MCP 2.1.1. It preserves local stdio but uses managed Google Cloud state for remote work. No deployment has been executed from this repository as part of the refactor.
 
 ## Fixed v1 topology
 

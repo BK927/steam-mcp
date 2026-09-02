@@ -66,7 +66,7 @@ MCP_SDK_V2 = True
 # Server + constants
 # ---------------------------------------------------------------------------
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 # Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
 # tool/prompt/template listings are static for the life of the process (~58 KB of

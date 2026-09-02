@@ -1,6 +1,6 @@
 # Steam MCP
 
-Steam MCP 2.1.0 is a read-only, compact Steam research server. It intentionally replaces the former wide tool catalog with eight task-oriented tools so clients do not carry dozens of irrelevant schemas in every conversation.
+Steam MCP 2.1.1 is a read-only, compact Steam research server. It intentionally replaces the former wide tool catalog with eight task-oriented tools so clients do not carry dozens of irrelevant schemas in every conversation.
 
 It supports two deployment profiles:
 
