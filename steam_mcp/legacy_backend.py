@@ -145,7 +145,7 @@ ALLOWED_HOSTS = frozenset({
 RATE_LIMITS = {
     "api.steampowered.com": (20.0, 20),
     "store.steampowered.com": (8.0, 12),
-    "steamcommunity.com": (2.0, 5),
+    "steamcommunity.com": (0.5, 1),
     # Be deliberately conservative with the free community mirror.
     "api.steamcmd.net": (2.0, 4),
 }
@@ -380,10 +380,14 @@ def _get_api_key() -> str:
     """
     key = os.environ.get(ENV_KEY, "").strip() or _load_key_from_dotenv()
     if not key:
+        configuration = (
+            f"Ask the hosted server operator to attach {ENV_KEY} as a runtime secret"
+            if os.environ.get("K_SERVICE")
+            else f"Set {ENV_KEY} in the server process environment or a project .env file"
+        )
         raise SteamApiError(
-            f"This tool needs a Steam Web API key, which is not configured. Set "
-            f"{ENV_KEY} in your MCP client config (or a .env file next to the "
-            f"project); a free key takes a minute at "
+            f"This tool needs a Steam Web API key, which is not configured. "
+            f"{configuration}; a free key takes a minute at "
             f"https://steamcommunity.com/dev/apikey\n\n"
             f"Keyless game and store research remains available through the public "
             f"steam_search, steam_game_get, steam_reviews_get, steam_community_get, "
@@ -862,6 +866,14 @@ def _handle_error(e: Exception) -> str:
         if code == 404:
             return "Error: Not found (404). Check the SteamID / app ID is correct."
         if code == 429:
+            if host == "steamcommunity.com":
+                retry_after = e.response.headers.get("Retry-After")
+                wait = f" Retry after {retry_after} seconds." if retry_after else ""
+                return (
+                    "Error: Steam Community limited this server/IP (429). "
+                    "Market and inventory endpoints are stricter than the Steam Web API; "
+                    f"reduce request volume and retry later.{wait}"
+                )
             return (
                 "Error: Rate limited by Steam (429). The Web API allows ~100,000 "
                 "calls/day per key. Wait and retry, or reduce request volume."
@@ -3680,6 +3692,11 @@ class DiscoverInput(BaseModel):
     limit: int = Field(
         default=15, description="Max results to return (1-50).", ge=1, le=50
     )
+    offset: int = Field(
+        default=0,
+        description="Internal storefront result offset used by the signed public cursor.",
+        ge=0,
+    )
     country_code: str = Field(default="us", min_length=2, max_length=2)
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
@@ -3752,7 +3769,7 @@ async def steam_discover(params: DiscoverInput) -> str:
         query = {
             "json": 1, "infinite": 1, "cc": cc, "l": "english",
             "category1": 998,                       # games only
-            "start": 0, "count": 100,
+            "start": params.offset, "count": 100,
         }
         if params.term:
             query["term"] = params.term
@@ -3771,6 +3788,7 @@ async def steam_discover(params: DiscoverInput) -> str:
             query["sort_by"] = sort_by
 
         appids, total = await _discover_appids(query)
+        scanned_count = len(appids)
         appids = [a for a in appids if a not in owned_ids]
         page = appids[: params.limit]
         pm = await _app_prices(page, cc) if page else {}
@@ -3793,6 +3811,7 @@ async def steam_discover(params: DiscoverInput) -> str:
 
         excluded = len(owned_ids) if (params.steamid and params.exclude_owned) else 0
         if params.response_format == ResponseFormat.JSON:
+            has_more = scanned_count > 0 and params.offset + scanned_count < int(total or 0)
             return _dump({
                 "filters": {
                     "term": params.term,
@@ -3811,6 +3830,10 @@ async def steam_discover(params: DiscoverInput) -> str:
                 "excluded_owned": excluded,
                 "total_count": total,
                 "count": len(rows),
+                "offset": params.offset,
+                "scanned_count": scanned_count,
+                "has_more": has_more,
+                "next_offset": params.offset + scanned_count if has_more else None,
                 "results": rows,
             })
 

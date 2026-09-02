@@ -809,3 +809,172 @@ def test_achievement_limit_and_signed_cursor_page_nested_sections() -> None:
         },
     )["structuredContent"]
     assert second["items"][0]["api_name"] == "TWO"
+
+
+def test_discover_uses_signed_cursor_and_snapshot_modes_are_explicit() -> None:
+    class SearchBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_discover":
+                current = arguments["offset"]
+                return {
+                    "total_count": 81,
+                    "offset": current,
+                    "count": 5,
+                    "has_more": current == 0,
+                    "next_offset": 5 if current == 0 else None,
+                    "results": [
+                        {"appid": current + index + 1, "name": f"Game {current + index + 1}"}
+                        for index in range(5)
+                    ],
+                }
+            if operation == "steam_get_featured_specials":
+                return {"specials": [{"appid": 1, "final_price": 10, "discount_pct": 20}]}
+            return await super().call(operation, arguments)
+
+    backend = SearchBackend()
+    server = make_server(backend)
+    first = call(
+        server,
+        "steam_search",
+        {"mode": "discover", "query": "roguelike", "limit": 5},
+    )["structuredContent"]
+    assert first["page"]["returned"] == 5
+    assert first["page"]["has_more"] is True
+    assert first["page"]["next_cursor"]
+
+    second = call(
+        server,
+        "steam_search",
+        {
+            "mode": "discover",
+            "query": "roguelike",
+            "limit": 5,
+            "cursor": first["page"]["next_cursor"],
+        },
+    )["structuredContent"]
+    assert second["items"][0]["appid"] == 6
+    assert second["page"]["has_more"] is False
+    assert [arguments["offset"] for operation, arguments in backend.calls if operation == "steam_discover"] == [0, 5]
+
+    deals = call(server, "steam_search", {"mode": "deals", "limit": 5})[
+        "structuredContent"
+    ]
+    assert deals["data"]["result_scope"] == "top_n_snapshot"
+    assert deals["data"]["pagination_supported"] is False
+
+
+def test_store_select_projection_is_strict_and_news_is_untrusted() -> None:
+    class GameBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_app_details":
+                return {
+                    "appid": arguments["appid"],
+                    "name": "Game",
+                    "price": "$10",
+                    "genres": ["RPG"],
+                }
+            if operation == "steam_get_app_news":
+                return {
+                    "appid": arguments["appid"],
+                    "news": [
+                        {
+                            "title": "Untrusted title",
+                            "excerpt": "<a href='https://example.test'>external</a>",
+                            "url": "https://example.test",
+                        }
+                    ],
+                }
+            return await super().call(operation, arguments)
+
+    server = make_server(GameBackend())
+    selected = call(
+        server,
+        "steam_game_get",
+        {"game": 10, "view": "summary", "select": ["appid", "name"]},
+    )["structuredContent"]
+    assert selected["data"] == {"appid": 10, "name": "Game"}
+
+    unsupported = call(
+        server,
+        "steam_game_get",
+        {"game": 10, "view": "summary", "select": ["package_groups"]},
+    )["structuredContent"]
+    assert unsupported["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert unsupported["details"]["unsupported_select"] == ["package_groups"]
+
+    news = call(server, "steam_game_get", {"game": 10, "view": "news"})[
+        "structuredContent"
+    ]
+    assert news["meta"]["untrusted_fields"] == [
+        "items[].title",
+        "items[].excerpt",
+        "items[].url",
+    ]
+
+
+def test_missing_store_and_package_entities_return_not_found() -> None:
+    class MissingBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_app_details":
+                return {"message": f"No store details found for app {arguments['appid']}."}
+            if operation == "steam_get_package_details":
+                return {"message": f"No package details found for {arguments['packageid']}."}
+            return await super().call(operation, arguments)
+
+    server = make_server(MissingBackend())
+    game = call(server, "steam_game_get", {"game": 999999, "view": "summary"})
+    assert game["structuredContent"]["code"] == ErrorCode.NOT_FOUND.value
+    assert game["structuredContent"]["retryable"] is False
+    package = call(
+        server,
+        "steam_community_get",
+        {"kind": "package", "ref": "999999"},
+    )
+    assert package["structuredContent"]["code"] == ErrorCode.NOT_FOUND.value
+
+
+def test_large_job_object_has_lossless_cursor_chunks() -> None:
+    class LargeOverviewBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_app_details":
+                return {"appid": arguments["appid"], "description": "x" * 3_000}
+            if operation == "steam_get_app_news":
+                return {
+                    "news": [
+                        {"title": "news", "excerpt": "y" * 1_000, "url": "https://example.test"}
+                    ]
+                }
+            return {"operation": operation, "arguments": arguments}
+
+    server = make_server(LargeOverviewBackend())
+    started = call(
+        server,
+        "steam_analyze",
+        {"task": "game_overview", "refs": ["10"]},
+    )["structuredContent"]
+    job_id = started["job"]["job_id"]
+    cursor = ""
+    chunks: list[str] = []
+    for _ in range(20):
+        page = call(
+            server,
+            "steam_job_get",
+            {"job_id": job_id, "cursor": cursor, "max_chars": 500},
+        )["structuredContent"]
+        assert page["data"]["result_format"] == "json_text_chunks"
+        assert page["page"]["returned"] == 1
+        assert page["meta"]["untrusted_fields"] == ["items[].chunk"]
+        chunks.append(page["items"][0]["chunk"])
+        cursor = page["page"]["next_cursor"] or ""
+        if not page["page"]["has_more"]:
+            break
+    else:  # pragma: no cover - protects against a non-advancing cursor
+        raise AssertionError("job result cursor did not terminate")
+
+    reconstructed = json.loads("".join(chunks))
+    assert reconstructed["store"]["description"] == "x" * 3_000
+    assert reconstructed["news"]["news"][0]["excerpt"] == "y" * 1_000

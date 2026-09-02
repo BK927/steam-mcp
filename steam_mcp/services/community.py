@@ -83,6 +83,18 @@ class CommunityService(BaseService):
                 f"Unsupported community kind: {kind}.",
                 schema_uri=f"steam://schema/steam_community_get.{kind}",
             )
+        message = data.get("message") if isinstance(data, dict) else None
+        if (
+            kind in {"package", "workshop"}
+            and isinstance(message, str)
+            and message.lower().startswith("no ")
+            and "found" in message.lower()
+        ):
+            raise ServiceError(
+                ErrorCode.NOT_FOUND,
+                f"No accessible Steam {kind} exists for {canonical_ref}.",
+                schema_uri=f"steam://schema/steam_community_get.{kind}",
+            )
         return self.result_envelope(
             data,
             canonical_uri=f"steam://entity/{kind}/{canonical_ref}",

@@ -11,6 +11,34 @@ GAME_VIEWS = frozenset(
     {"summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"}
 )
 
+STORE_SELECT_FIELDS = frozenset(
+    {
+        "appid", "name", "type", "is_free", "price", "initial_price",
+        "discount_pct", "developers", "publishers", "release_date",
+        "coming_soon", "genres", "categories", "features",
+        "controller_support", "steam_deck", "platforms", "metacritic",
+        "metacritic_url", "recommendations_total", "achievements_total",
+        "dlc", "dlc_count", "required_age", "mature_content",
+        "supported_languages", "full_audio_languages", "website",
+        "short_description", "pc_requirements", "about_the_game",
+    }
+)
+
+GAME_OPTIONS = {
+    "summary": frozenset({"include_requirements", "include_long_description"}),
+    "store": frozenset({"include_requirements", "include_long_description"}),
+    "compatibility": frozenset(),
+    "technical": frozenset(
+        {"section", "branch", "platform", "include_launch_options", "include_all_manifests"}
+    ),
+    "dlc": frozenset({"enrich", "on_sale_only"}),
+    "tags": frozenset(),
+    "achievements": frozenset(),
+    "live": frozenset(),
+    "news": frozenset(),
+    "pricing": frozenset({"countries"}),
+}
+
 
 class GameService(BaseService):
     async def get(
@@ -29,6 +57,23 @@ class GameService(BaseService):
                 f"Unsupported game view: {view}.",
                 schema_uri=f"steam://schema/steam_game_get.{view}",
             )
+        unknown_options = sorted(set(options) - GAME_OPTIONS[view])
+        if unknown_options:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported options for {view}: {', '.join(unknown_options)}.",
+                schema_uri=f"steam://schema/steam_game_get.{view}",
+                details={
+                    "unsupported_options": unknown_options,
+                    "allowed": sorted(GAME_OPTIONS[view]),
+                },
+            )
+        if select and view not in {"summary", "store", "technical", "achievements"}:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"select is not supported for the {view} view.",
+                schema_uri=f"steam://schema/steam_game_get.{view}",
+            )
         language, country = locale_values(locale)
         appid = await self.appid(game, country, language)
         size = bounded_limit(limit, 20, 100)
@@ -45,6 +90,7 @@ class GameService(BaseService):
         offset = int(state.get("offset", 0))
         preferred: tuple[str, ...] = ()
         has_more = False
+        untrusted_fields: list[str] | None = None
 
         if view in {"summary", "store"}:
             data = await self.call(
@@ -58,6 +104,26 @@ class GameService(BaseService):
                 },
                 ttl=600,
             )
+            message = data.get("message") if isinstance(data, dict) else None
+            if isinstance(message, str) and message.startswith("No store details found"):
+                raise ServiceError(
+                    ErrorCode.NOT_FOUND,
+                    f"No accessible Steam store entity exists for app {appid}.",
+                    schema_uri=f"steam://schema/steam_game_get.{view}",
+                )
+            if select:
+                unknown_select = sorted(set(select) - STORE_SELECT_FIELDS)
+                if unknown_select:
+                    raise ServiceError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        f"Unsupported select fields: {', '.join(unknown_select)}.",
+                        schema_uri=f"steam://schema/steam_game_get.{view}",
+                        details={
+                            "unsupported_select": unknown_select,
+                            "allowed": sorted(STORE_SELECT_FIELDS),
+                        },
+                    )
+                data = {field: data[field] for field in select if field in data}
         elif view == "compatibility":
             data = await self.call(
                 "steam_get_deck_compatibility", {"appid": appid, "language": language}, ttl=3_600
@@ -175,6 +241,7 @@ class GameService(BaseService):
         elif view == "news":
             data = await self.call("steam_get_app_news", {"appid": appid, "count": size}, ttl=300)
             preferred = ("news", "items")
+            untrusted_fields = ["items[].title", "items[].excerpt", "items[].url"]
         else:
             data = await self.call(
                 "steam_get_app_regional_pricing",
@@ -194,4 +261,5 @@ class GameService(BaseService):
             provider="steamcmd" if view == "technical" else "steam_store",
             preferred_items=preferred,
             next_cursor=next_value,
+            untrusted_fields=untrusted_fields,
         )

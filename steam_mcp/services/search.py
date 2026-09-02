@@ -38,7 +38,6 @@ class SearchService(BaseService):
         limit: int,
         locale: dict[str, Any],
     ) -> dict[str, Any]:
-        del cursor  # current upstream searches expose one bounded page
         if mode not in SEARCH_MODES:
             raise ServiceError(
                 ErrorCode.INVALID_ARGUMENT,
@@ -54,6 +53,28 @@ class SearchService(BaseService):
             )
         language, country = locale_values(locale)
         size = bounded_limit(limit, 10, 30)
+        cursor_filters = {
+            "mode": mode,
+            "query": query,
+            "filters": filters,
+            "limit": size,
+            "language": language,
+            "country": country,
+        }
+        if cursor and mode != "discover":
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"{mode} mode is a bounded snapshot and does not accept cursor.",
+                schema_uri=f"steam://schema/steam_search.{mode}",
+            )
+        state = self.page_state(
+            cursor,
+            scope=f"search:{mode}",
+            filters=cursor_filters,
+            initial={"offset": 0},
+        )
+        page_offset = int(state.get("offset", 0))
+        next_value: str | None = None
         if mode == "lookup":
             if not query.strip():
                 raise ServiceError(ErrorCode.INVALID_ARGUMENT, "lookup mode requires query.")
@@ -77,11 +98,20 @@ class SearchService(BaseService):
                     "exclude_owned": bool(filters.get("exclude_owned", True)),
                     "released_within_days": filters.get("released_within_days"),
                     "limit": size,
+                    "offset": page_offset,
                     "country_code": country,
                 },
                 ttl=300,
             )
             preferred = ("results", "games")
+            if isinstance(data, dict) and data.get("has_more"):
+                next_offset = data.get("next_offset")
+                if isinstance(next_offset, int) and next_offset > page_offset:
+                    next_value = self.next_cursor(
+                        scope=f"search:{mode}",
+                        filters=cursor_filters,
+                        state={"offset": next_offset},
+                    )
         elif mode == "deals":
             max_price = self._optional_number(filters, "max_price", minimum=0)
             min_discount = self._optional_number(
@@ -111,6 +141,13 @@ class SearchService(BaseService):
                         if (self._row_number(row, "discount_pct") or 0) >= min_discount
                     ]
                 data = {**data, "specials": rows[:size], "count": len(rows[:size])}
+            if isinstance(data, dict):
+                data = {
+                    **data,
+                    "result_scope": "top_n_snapshot",
+                    "requested_limit": size,
+                    "pagination_supported": False,
+                }
             preferred = ("specials", "games", "items")
         else:
             data = await self.call(
@@ -122,12 +159,20 @@ class SearchService(BaseService):
                 },
                 ttl=120,
             )
+            if isinstance(data, dict):
+                data = {
+                    **data,
+                    "result_scope": "top_n_snapshot",
+                    "requested_limit": size,
+                    "pagination_supported": False,
+                }
             preferred = ("games", "items", "results")
         return self.result_envelope(
             data,
             canonical_uri="steam://entity/search/current",
             provider="steam_store",
             preferred_items=preferred,
+            next_cursor=next_value,
         )
 
     @staticmethod

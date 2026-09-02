@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import time
 from typing import Any
 
@@ -10,7 +11,6 @@ from ..contracts import (
     CooperativeCancellation,
     ErrorCode,
     ServiceError,
-    bounded_value,
     job_envelope,
 )
 from ..jobs import JobRecord, JobRunner, JobStore, ResultStore, TERMINAL_STATES
@@ -396,19 +396,64 @@ class AnalysisService(BaseService):
         envelope = job_envelope(self.public_job(job))
         if job.status != "succeeded" or not job.result_ref:
             return envelope
+        if not 500 <= max_chars <= 32_000:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "max_chars must be between 500 and 32000.",
+                schema_uri="steam://schema/steam_job_get",
+            )
         result = await self.result_store.get(job.result_ref)
         envelope["meta"]["untrusted_fields"] = self._untrusted_fields(job.task)
         page_limit = bounded_limit(limit, 20, 100)
         offset = 0
-        filters = {"job_id": job_id, "limit": page_limit}
-        if cursor:
-            offset = int(self.cursor.decode(cursor, scope="job:result", filters=filters).get("offset", 0))
+        filters = {"job_id": job_id, "limit": page_limit, "max_chars": max_chars}
         items, container = self._pageable(result)
         if items is None:
-            envelope["data"], truncated = bounded_value(result, max(500, min(max_chars, 32_000)))
-            if truncated:
-                envelope["meta"]["warnings"].append("Job result text was truncated to the requested budget.")
+            serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            chunk_budget = min(max_chars, 8_000)
+            if not cursor and len(serialized) <= chunk_budget:
+                envelope["data"] = result
+                return envelope
+            if cursor:
+                state = self.cursor.decode(cursor, scope="job:result", filters=filters)
+                if state.get("mode") != "text":
+                    raise ServiceError(ErrorCode.CURSOR_MISMATCH, "The job cursor mode is invalid.")
+                offset = int(state.get("offset", 0))
+                if offset < 0 or offset >= len(serialized):
+                    raise ServiceError(ErrorCode.CURSOR_MISMATCH, "The job cursor offset is invalid.")
+            chunk = serialized[offset:offset + chunk_budget]
+            next_offset = offset + len(chunk)
+            has_more = next_offset < len(serialized)
+            envelope["data"] = {
+                "result_format": "json_text_chunks",
+                "encoding": "utf-8",
+                "total_chars": len(serialized),
+                "chunk_start": offset,
+                "chunk_end": next_offset,
+                "complete": not has_more,
+            }
+            envelope["items"] = [{"chunk": chunk}]
+            envelope["page"] = {
+                "returned": 1,
+                "has_more": has_more,
+                "next_cursor": self.cursor.encode(
+                    scope="job:result",
+                    filters=filters,
+                    state={"mode": "text", "offset": next_offset},
+                    expires_at=job.expires_at,
+                ) if has_more else None,
+            }
+            envelope["meta"]["warnings"].append(
+                "Job result is returned as lossless JSON text chunks; concatenate items[].chunk in cursor order before parsing."
+            )
+            if envelope["meta"]["untrusted_fields"]:
+                envelope["meta"]["untrusted_fields"] = ["items[].chunk"]
             return envelope
+        if cursor:
+            state = self.cursor.decode(cursor, scope="job:result", filters=filters)
+            if state.get("mode") != "list":
+                raise ServiceError(ErrorCode.CURSOR_MISMATCH, "The job cursor mode is invalid.")
+            offset = int(state.get("offset", 0))
         page = items[offset:offset + page_limit]
         has_more = offset + len(page) < len(items)
         envelope["data"] = container
@@ -419,7 +464,7 @@ class AnalysisService(BaseService):
             "next_cursor": self.cursor.encode(
                 scope="job:result",
                 filters=filters,
-                state={"offset": offset + len(page)},
+                state={"mode": "list", "offset": offset + len(page)},
                 expires_at=job.expires_at,
             ) if has_more else None,
         }
@@ -482,6 +527,7 @@ class AnalysisService(BaseService):
             return [
                 "data.reviews.reviews[].excerpt",
                 "data.news.news[].title",
-                "data.news.news[].contents",
+                "data.news.news[].excerpt",
+                "data.news.news[].url",
             ]
         return []
