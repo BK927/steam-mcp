@@ -293,21 +293,38 @@ class CloudTasksJobRunner:
         service_account_email: str | None = None,
         worker_token: str | None = None,
         client: Any | None = None,
+        client_factory: Any | None = None,
     ) -> None:
         self.supports_retry = True
-        if client is None:
-            try:
-                from google.cloud import tasks_v2
-            except ImportError as exc:  # pragma: no cover - optional install
-                raise RuntimeError("Install steam-mcp[gcp] to use CloudTasksJobRunner") from exc
-            client = tasks_v2.CloudTasksAsyncClient()
         self.client = client
-        self.parent = client.queue_path(project, location, queue)
+        self.client_factory = client_factory
+        self.parent = (
+            client.queue_path(project, location, queue)
+            if client is not None
+            else f"projects/{project}/locations/{location}/queues/{queue}"
+        )
         self.worker_url = worker_url
         self.service_account_email = service_account_email
         self.worker_token = worker_token
 
+    def _client(self) -> Any:
+        if self.client is None:
+            if self.client_factory is None:
+                try:
+                    from google.cloud import tasks_v2
+                except ImportError as exc:  # pragma: no cover - optional install
+                    raise RuntimeError(
+                        "Install steam-mcp[gcp] to use CloudTasksJobRunner"
+                    ) from exc
+                self.client_factory = tasks_v2.CloudTasksAsyncClient
+            # Construct the async gRPC client only after submit() is running on
+            # the server loop. Creating it during ASGI setup binds its channel
+            # to a different loop and every RPC fails before reaching GCP.
+            self.client = self.client_factory()
+        return self.client
+
     async def submit(self, job_id: str, payload: dict[str, Any]) -> None:
+        client = self._client()
         headers = {"Content-Type": "application/json"}
         if self.worker_token:
             headers["X-Steam-Worker-Token"] = self.worker_token
@@ -334,7 +351,7 @@ class CloudTasksJobRunner:
             # The async client's flattened ``task=`` parameter expects a Task
             # proto. A mapping is supported only as the top-level request.
             await _invoke(
-                self.client.create_task,
+                client.create_task,
                 request={"parent": self.parent, "task": task},
             )
         except Exception as exc:  # noqa: BLE001

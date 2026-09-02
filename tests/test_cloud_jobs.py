@@ -247,6 +247,27 @@ def test_cloud_tasks_duplicate_name_is_idempotent() -> None:
     assert client.created[0]["request"]["task"]["name"].endswith("/tasks/same-job")
 
 
+def test_cloud_tasks_client_is_created_lazily_on_submit_loop() -> None:
+    client = FakeTasks()
+    factory_calls: list[bool] = []
+
+    def factory() -> FakeTasks:
+        factory_calls.append(True)
+        return client
+
+    runner = CloudTasksJobRunner(
+        project="p",
+        location="asia-northeast1",
+        queue="steam-analysis",
+        worker_url="https://worker/internal/jobs/run",
+        client_factory=factory,
+    )
+    assert factory_calls == []
+    run(runner.submit("lazy-job", {"task": "game_overview", "refs": ["10"]}))
+    assert factory_calls == [True]
+    assert client.created[0]["request"]["parent"].endswith("/queues/steam-analysis")
+
+
 async def endpoint_request(
     endpoint: WorkerEndpoint,
     payload: dict[str, Any],
