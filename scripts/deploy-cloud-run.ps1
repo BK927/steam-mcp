@@ -13,7 +13,7 @@ param(
   [string]$BucketName = "",
   [string]$JobCollection = "steam_jobs",
   [string]$OAuthCodeCollection = "steam_oauth_codes",
-  [int]$SmokeAppId = 570,
+  [int]$SmokeAppId = 1086940,
   [string]$TokenEnvironmentVariable = "STEAM_MCP_ACCESS_TOKEN",
   [switch]$RotateAccessToken,
   [switch]$Promote

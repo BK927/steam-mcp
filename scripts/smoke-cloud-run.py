@@ -84,7 +84,7 @@ async def smoke(url: str, app_id: int) -> None:
             for _ in range(45):
                 status_result = await client.call_tool(
                     "steam_job_get",
-                    {"job_id": job_id, "limit": 1, "max_chars": 1_000},
+                    {"job_id": job_id, "limit": 1, "max_chars": 32_000},
                     read_timeout_seconds=60,
                 )
                 if status_result.is_error or not status_result.structured_content:
@@ -155,7 +155,7 @@ async def smoke(url: str, app_id: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
-    parser.add_argument("--app-id", type=int, default=570)
+    parser.add_argument("--app-id", type=int, default=1086940)
     args = parser.parse_args()
     asyncio.run(smoke(args.url, args.app_id))
     print(
