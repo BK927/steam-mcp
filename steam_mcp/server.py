@@ -88,6 +88,9 @@ def _public_dependencies() -> ServerDependencies:
             "default_user_configured": bool(legacy_backend._get_default_user()),
             "job_backend": job_backend,
             "process_role": os.getenv("STEAM_PROCESS_ROLE", "mcp").strip().lower(),
+            "community_market": os.getenv(
+                "STEAM_COMMUNITY_MARKET_STATUS", "experimental"
+            ).strip().lower(),
         },
         max_result_bytes=_read_int_env(
             "STEAM_MAX_RESULT_BYTES", 12_288, 4_096, 32_768

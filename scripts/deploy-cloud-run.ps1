@@ -192,6 +192,7 @@ function Deploy-McpCandidate {
     STEAM_JOB_TTL_SECONDS = "604800"
     STEAM_CURSOR_TTL_SECONDS = "86400"
     STEAM_MAX_RESULT_BYTES = "12288"
+    STEAM_COMMUNITY_MARKET_STATUS = "degraded"
   })
   $secretValues = "MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion,MCP_OAUTH_LOGIN_SECRET=steam-mcp-oauth-login-secret:$oauthLoginVersion,MCP_OAUTH_SIGNING_SECRET=steam-mcp-oauth-signing-secret:$oauthSigningVersion,STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
   if ($steamApiVersion) { $secretValues += ",STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }

@@ -51,6 +51,64 @@ class SearchService(BaseService):
                 f"Unsupported filters for {mode}: {', '.join(unknown)}.",
                 schema_uri=f"steam://schema/steam_search.{mode}",
             )
+        schema_uri = f"steam://schema/steam_search.{mode}"
+        for key in ("on_sale", "exclude_owned"):
+            if key in filters and not isinstance(filters[key], bool):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"filters.{key} must be boolean.",
+                    schema_uri=schema_uri,
+                )
+        if "tags" in filters:
+            tags = filters["tags"]
+            if (
+                not isinstance(tags, list)
+                or len(tags) > 10
+                or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "filters.tags must contain at most 10 non-empty strings.",
+                    schema_uri=schema_uri,
+                )
+        if "max_price" in filters and mode == "discover":
+            value = filters["max_price"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1_000:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "filters.max_price must be an integer between 0 and 1000.",
+                    schema_uri=schema_uri,
+                )
+        if "released_within_days" in filters:
+            value = filters["released_within_days"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3_650:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "filters.released_within_days must be an integer between 1 and 3650.",
+                    schema_uri=schema_uri,
+                )
+        enums = {
+            "platform": {"win", "mac", "linux"},
+            "sort": {"reviews", "release", "price_asc", "price_desc", "relevance"},
+            "section": {"top_sellers", "new_releases", "coming_soon", "specials"},
+        }
+        for key, allowed_values in enums.items():
+            if key in filters and filters[key] not in allowed_values:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"filters.{key} is not supported.",
+                    schema_uri=schema_uri,
+                    details={"allowed": sorted(allowed_values)},
+                )
+        if "player" in filters and (
+            not isinstance(filters["player"], str)
+            or not 1 <= len(filters["player"].strip()) <= 200
+        ):
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "filters.player must be a non-empty Steam reference.",
+                schema_uri=schema_uri,
+            )
         language, country = locale_values(locale)
         size = bounded_limit(limit, 10, 30)
         cursor_filters = {

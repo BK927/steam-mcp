@@ -3769,7 +3769,10 @@ async def steam_discover(params: DiscoverInput) -> str:
         query = {
             "json": 1, "infinite": 1, "cc": cc, "l": "english",
             "category1": 998,                       # games only
-            "start": params.offset, "count": 100,
+            # Public discovery pages advance by the number of upstream rows
+            # consumed. Fetch only one public page here; fetching 100 and then
+            # returning 30 made the remaining 70 rows unreachable.
+            "start": params.offset, "count": params.limit,
         }
         if params.term:
             query["term"] = params.term

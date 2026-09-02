@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
+import re
 import time
 from typing import Any
 
@@ -26,6 +28,77 @@ ANALYSIS_TASKS = frozenset(
         "purchase_decision",
         "recommendations",
         "coop_plan",
+    }
+)
+
+ANALYSIS_OPTIONS = {
+    "friend_ownership": frozenset({"max_friends", "playing_now", "limit"}),
+    "review_insights": frozenset(
+        {
+            "sort_by", "review_type", "purchase_type", "language",
+            "include_offtopic_activity", "include_author_id", "country", "cursor",
+            "max_reviews", "max_pages", "max_seconds", "max_text_chars",
+            "sample_per_bucket",
+        }
+    ),
+    "game_overview": frozenset(
+        {"country", "language", "news_count", "include_technical", "branch"}
+    ),
+    "player_compare": frozenset({"limit"}),
+    "library_insights": frozenset(
+        {
+            "top_limit", "backlog_limit", "abandoned_limit", "abandoned_sort",
+            "stale_days", "exclude_temp_clients",
+        }
+    ),
+    "purchase_decision": frozenset(
+        {"player", "country", "language", "recent_max_reviews"}
+    ),
+    "recommendations": frozenset(
+        {"player", "tags", "max_price", "limit", "country"}
+    ),
+    "coop_plan": frozenset(
+        {"mode", "online_only", "max_friends", "min_friends_owning", "limit", "country"}
+    ),
+}
+
+ANALYSIS_INTEGER_RANGES = {
+    ("friend_ownership", "max_friends"): (1, 250),
+    ("friend_ownership", "limit"): (1, 100),
+    ("review_insights", "max_reviews"): (1, 50_000),
+    ("review_insights", "max_pages"): (0, 100_000),
+    ("review_insights", "max_text_chars"): (100, 4_000),
+    ("review_insights", "sample_per_bucket"): (0, 25),
+    ("game_overview", "news_count"): (0, 10),
+    ("player_compare", "limit"): (1, 100),
+    ("library_insights", "top_limit"): (1, 50),
+    ("library_insights", "backlog_limit"): (0, 100),
+    ("library_insights", "abandoned_limit"): (0, 100),
+    ("library_insights", "stale_days"): (30, 3_650),
+    ("purchase_decision", "recent_max_reviews"): (0, 50_000),
+    ("recommendations", "max_price"): (0, 1_000),
+    ("recommendations", "limit"): (1, 30),
+    ("coop_plan", "max_friends"): (1, 100),
+    ("coop_plan", "min_friends_owning"): (1, 50),
+    ("coop_plan", "limit"): (1, 50),
+}
+
+ANALYSIS_ENUMS = {
+    ("review_insights", "sort_by"): frozenset({"recent", "updated"}),
+    ("review_insights", "review_type"): frozenset({"all", "positive", "negative"}),
+    ("review_insights", "purchase_type"): frozenset(
+        {"all", "steam", "non_steam_purchase"}
+    ),
+    ("library_insights", "abandoned_sort"): frozenset(
+        {"recent", "oldest", "playtime"}
+    ),
+    ("coop_plan", "mode"): frozenset({"owned", "new"}),
+}
+
+ANALYSIS_BOOLEAN_OPTIONS = frozenset(
+    {
+        "playing_now", "include_offtopic_activity", "include_author_id",
+        "include_technical", "exclude_temp_clients", "online_only",
     }
 )
 
@@ -67,6 +140,7 @@ class AnalysisService(BaseService):
             )
         if not refs:
             raise ServiceError(ErrorCode.INVALID_ARGUMENT, "refs must contain at least one reference.")
+        self._validate_options(task, options)
         payload = {"task": task, "refs": refs, "options": options}
         job = await self.job_store.create(task, refs, options, request_id or None)
         if job.status == "queued":
@@ -505,6 +579,96 @@ class AnalysisService(BaseService):
     def _need(refs: list[str], count: int, task: str) -> None:
         if len(refs) < count:
             raise ServiceError(ErrorCode.INVALID_ARGUMENT, f"{task} requires {count} references.")
+
+    @staticmethod
+    def _validate_options(task: str, options: dict[str, Any]) -> None:
+        allowed = ANALYSIS_OPTIONS[task]
+        schema_uri = f"steam://schema/steam_analyze.{task}"
+        unexpected = sorted(set(options) - allowed)
+        if unexpected:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported options for {task}: {', '.join(unexpected)}.",
+                schema_uri=schema_uri,
+                details={"unexpected": unexpected, "allowed": sorted(allowed)},
+            )
+        for key in sorted(set(options) & ANALYSIS_BOOLEAN_OPTIONS):
+            if not isinstance(options[key], bool):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"options.{key} must be boolean.",
+                    schema_uri=schema_uri,
+                )
+        for (option_task, key), (minimum, maximum) in ANALYSIS_INTEGER_RANGES.items():
+            if option_task != task or key not in options:
+                continue
+            value = options[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"options.{key} must be an integer between {minimum} and {maximum}.",
+                    schema_uri=schema_uri,
+                    details={"minimum": minimum, "maximum": maximum},
+                )
+        if "max_seconds" in options:
+            seconds = options["max_seconds"]
+            if (
+                isinstance(seconds, bool)
+                or not isinstance(seconds, (int, float))
+                or not math.isfinite(float(seconds))
+                or not 0 <= float(seconds) <= 86_400
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "options.max_seconds must be between 0 and 86400.",
+                    schema_uri=schema_uri,
+                )
+        for (option_task, key), values in ANALYSIS_ENUMS.items():
+            if option_task != task or key not in options:
+                continue
+            if options[key] not in values:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"options.{key} is not supported.",
+                    schema_uri=schema_uri,
+                    details={"allowed": sorted(values)},
+                )
+        if "country" in options and (
+            not isinstance(options["country"], str)
+            or re.fullmatch(r"[A-Za-z]{2}", options["country"].strip()) is None
+        ):
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.country must be a two-letter country code.",
+                schema_uri=schema_uri,
+            )
+        for key, minimum, maximum in (
+            ("language", 2, 32),
+            ("branch", 1, 128),
+            ("player", 1, 200),
+            ("cursor", 1, 8_192),
+        ):
+            if key in options and (
+                not isinstance(options[key], str)
+                or not minimum <= len(options[key].strip()) <= maximum
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"options.{key} must be a string between {minimum} and {maximum} characters.",
+                    schema_uri=schema_uri,
+                )
+        if "tags" in options:
+            tags = options["tags"]
+            if (
+                not isinstance(tags, list)
+                or len(tags) > 10
+                or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "options.tags must contain at most 10 non-empty strings.",
+                    schema_uri=schema_uri,
+                )
 
     @staticmethod
     def _pageable(result: Any) -> tuple[list[Any] | None, Any]:

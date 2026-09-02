@@ -229,6 +229,31 @@ def bounded_limit(value: int, default: int, maximum: int) -> int:
 
 def locale_values(locale: dict[str, Any] | None) -> tuple[str, str]:
     value = locale or {}
-    language = str(value.get("language") or "english")[:32]
-    country = str(value.get("country") or "us").lower()[:2]
+    allowed = {"language", "country"}
+    unexpected = sorted(set(value) - allowed)
+    if unexpected:
+        raise ServiceError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Unsupported locale fields: {', '.join(unexpected)}.",
+            details={"unexpected": unexpected, "allowed": sorted(allowed)},
+        )
+    raw_language = value.get("language", "english")
+    raw_country = value.get("country", "us")
+    if not isinstance(raw_language, str) or not 2 <= len(raw_language.strip()) <= 32:
+        raise ServiceError(
+            ErrorCode.INVALID_ARGUMENT,
+            "locale.language must be a string between 2 and 32 characters.",
+            details={"allowed": ["language", "country"]},
+        )
+    if (
+        not isinstance(raw_country, str)
+        or re.fullmatch(r"[A-Za-z]{2}", raw_country.strip()) is None
+    ):
+        raise ServiceError(
+            ErrorCode.INVALID_ARGUMENT,
+            "locale.country must be a two-letter country code.",
+            details={"allowed": ["language", "country"]},
+        )
+    language = raw_language.strip()
+    country = raw_country.strip().lower()
     return language, country

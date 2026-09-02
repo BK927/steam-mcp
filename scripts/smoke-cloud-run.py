@@ -66,6 +66,57 @@ async def smoke(url: str, app_id: int) -> None:
             if not invalid_filter.is_error or invalid_body.get("code") != "INVALID_ARGUMENT":
                 raise RuntimeError("unknown deal filter was not rejected")
 
+            discovery = await client.call_tool(
+                "steam_search",
+                {"mode": "discover", "query": "roguelike", "limit": 5},
+                read_timeout_seconds=60,
+            )
+            discovery_body = discovery.structured_content or {}
+            discovery_items = discovery_body.get("items") or []
+            discovery_data = discovery_body.get("data") or {}
+            discovery_page = discovery_body.get("page") or {}
+            if discovery.is_error or not discovery_items:
+                raise RuntimeError("discover page one failed")
+            if (
+                int(discovery_data.get("total_count") or 0) > len(discovery_items)
+                and not discovery_page.get("next_cursor")
+            ):
+                raise RuntimeError("discover hid remaining results without a cursor")
+            if discovery_page.get("next_cursor"):
+                next_discovery = await client.call_tool(
+                    "steam_search",
+                    {
+                        "mode": "discover",
+                        "query": "roguelike",
+                        "limit": 5,
+                        "cursor": discovery_page["next_cursor"],
+                    },
+                    read_timeout_seconds=60,
+                )
+                next_items = (next_discovery.structured_content or {}).get("items") or []
+                first_ids = {row.get("appid") for row in discovery_items if isinstance(row, dict)}
+                next_ids = {row.get("appid") for row in next_items if isinstance(row, dict)}
+                if next_discovery.is_error or not next_items or first_ids & next_ids:
+                    raise RuntimeError("discover signed continuation failed")
+
+            invalid_analysis = await client.call_tool(
+                "steam_analyze",
+                {
+                    "task": "game_overview",
+                    "refs": [str(app_id)],
+                    "options": {"locale": {"country": "kr"}},
+                },
+                read_timeout_seconds=60,
+            )
+            invalid_analysis_body = invalid_analysis.structured_content or {}
+            if (
+                not invalid_analysis.is_error
+                or invalid_analysis_body.get("code") != "INVALID_ARGUMENT"
+                or invalid_analysis_body.get("schema_uri")
+                != "steam://schema/steam_analyze.game_overview"
+            ):
+                raise RuntimeError("unknown analysis option was not rejected")
+
             analysis = await client.call_tool(
                 "steam_analyze",
                 {

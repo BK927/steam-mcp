@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..contracts import ErrorCode, ServiceError
@@ -68,6 +69,66 @@ class GameService(BaseService):
                     "allowed": sorted(GAME_OPTIONS[view]),
                 },
             )
+        schema_uri = f"steam://schema/steam_game_get.{view}"
+        boolean_options = {
+            "include_requirements", "include_long_description",
+            "include_launch_options", "include_all_manifests", "enrich",
+            "on_sale_only",
+        }
+        invalid_bools = sorted(
+            key for key in options
+            if key in boolean_options and not isinstance(options[key], bool)
+        )
+        if invalid_bools:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Boolean options required: {', '.join(invalid_bools)}.",
+                schema_uri=schema_uri,
+                details={"invalid": invalid_bools},
+            )
+        if "section" in options and options["section"] not in {
+            "product", "branches", "depots", "current_build"
+        }:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.section is not supported.",
+                schema_uri=schema_uri,
+                details={"allowed": ["branches", "current_build", "depots", "product"]},
+            )
+        if "platform" in options and options["platform"] not in {
+            "all", "windows", "linux", "macos"
+        }:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.platform is not supported.",
+                schema_uri=schema_uri,
+                details={"allowed": ["all", "linux", "macos", "windows"]},
+            )
+        if "branch" in options and (
+            not isinstance(options["branch"], str)
+            or not 1 <= len(options["branch"].strip()) <= 128
+        ):
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.branch must be a string between 1 and 128 characters.",
+                schema_uri=schema_uri,
+            )
+        if "countries" in options:
+            countries = options["countries"]
+            if (
+                not isinstance(countries, list)
+                or not 1 <= len(countries) <= 100
+                or any(
+                    not isinstance(country, str)
+                    or re.fullmatch(r"[A-Za-z]{2}", country.strip()) is None
+                    for country in countries
+                )
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "options.countries must contain 1 to 100 two-letter country codes.",
+                    schema_uri=schema_uri,
+                )
         if select and view not in {"summary", "store", "technical", "achievements"}:
             raise ServiceError(
                 ErrorCode.INVALID_ARGUMENT,
@@ -131,8 +192,14 @@ class GameService(BaseService):
         elif view == "technical":
             sections = select or [str(options.get("section") or "product")]
             allowed = {"product", "branches", "depots", "current_build"}
-            if set(sections) - allowed:
-                raise ServiceError(ErrorCode.INVALID_ARGUMENT, "Unknown technical section.")
+            unexpected = sorted(set(sections) - allowed)
+            if unexpected:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"Unsupported technical sections: {', '.join(unexpected)}.",
+                    schema_uri="steam://schema/steam_game_get.technical",
+                    details={"unexpected": unexpected, "allowed": sorted(allowed)},
+                )
             data = {}
             for section in sections:
                 if section == "product":

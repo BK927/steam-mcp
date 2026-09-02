@@ -25,6 +25,7 @@ from .services import (
     SearchService,
 )
 from .services.base import Backend
+from .services.analysis import ANALYSIS_OPTIONS
 from .oauth import OAuthRuntime
 
 
@@ -136,7 +137,7 @@ def create_server(
         dependencies.job_runner,
     )
 
-    async def invoke(action: Any, summary: str) -> CallToolResult:
+    async def invoke(action: Any, summary: str, schema_uri: str) -> CallToolResult:
         try:
             return success_result(
                 await action,
@@ -144,6 +145,14 @@ def create_server(
                 max_bytes=dependencies.max_result_bytes,
             )
         except ServiceError as exc:
+            if exc.schema_uri is None:
+                exc = ServiceError(
+                    exc.code,
+                    exc.message,
+                    retryable=exc.retryable,
+                    schema_uri=schema_uri,
+                    details=exc.details,
+                )
             return error_result(exc)
         except Exception as exc:  # noqa: BLE001
             # Do not log arguments or exception text here: upstream request
@@ -158,6 +167,7 @@ def create_server(
                     ErrorCode.PROVIDER_UNAVAILABLE,
                     "The Steam service failed unexpectedly.",
                     retryable=True,
+                    schema_uri=schema_uri,
                 )
             )
 
@@ -181,6 +191,7 @@ def create_server(
         return await invoke(
             game_service.get(game, view, select or [], options or {}, cursor, limit, locale or {}),
             f"Steam game {game}: {view}",
+            f"steam://schema/steam_game_get.{view}",
         )
 
     @server.tool(
@@ -196,7 +207,7 @@ def create_server(
         select: list[str] | None = None,
         options: dict[str, Any] | None = None,
         cursor: str = "",
-        limit: int = 25,
+        limit: LIMIT_100 = 25,
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
@@ -211,6 +222,7 @@ def create_server(
                 locale or {},
             ),
             f"Steam player {player or 'default'}: {view}",
+            f"steam://schema/steam_player_get.{view}",
         )
 
     @server.tool(
@@ -230,6 +242,7 @@ def create_server(
         return await invoke(
             search_service.search(mode, query, filters or {}, cursor, limit, locale or {}),
             f"Steam search: {mode}",
+            f"steam://schema/steam_search.{mode}",
         )
 
     @server.tool(
@@ -258,6 +271,7 @@ def create_server(
                 locale or {},
             ),
             f"Steam reviews for {game}: {mode}",
+            f"steam://schema/steam_reviews_get.{mode}",
         )
 
     @server.tool(
@@ -275,6 +289,7 @@ def create_server(
         return await invoke(
             community_service.get(kind, ref, options or {}, locale or {}),
             f"Steam community {kind}: {ref}",
+            f"steam://schema/steam_community_get.{kind}",
         )
 
     @server.tool(
@@ -294,6 +309,7 @@ def create_server(
         return await invoke(
             analysis_service.start(task, refs, options or {}, request_id),
             f"Steam analysis: {task}",
+            f"steam://schema/steam_analyze.{task}",
         )
 
     @server.tool(
@@ -311,6 +327,7 @@ def create_server(
         return await invoke(
             analysis_service.get(job_id, cursor, limit, max_chars),
             f"Steam analysis job {job_id}",
+            "steam://schema/steam_job_get",
         )
 
     @server.tool(
@@ -320,7 +337,11 @@ def create_server(
         structured_output=False,
     )
     async def steam_job_cancel(job_id: str) -> CallToolResult:
-        return await invoke(analysis_service.cancel(job_id), f"Cancelled Steam job {job_id}")
+        return await invoke(
+            analysis_service.cancel(job_id),
+            f"Cancelled Steam job {job_id}",
+            "steam://schema/steam_job_cancel",
+        )
 
     catalog = _catalog(dependencies.status)
 
@@ -379,6 +400,8 @@ def _compact_tool_schemas(server: MCPServer) -> None:
     def strip_titles(value: Any) -> None:
         if isinstance(value, dict):
             value.pop("title", None)
+            if value.get("default", object()) is None:
+                value.pop("default", None)
             for child in value.values():
                 strip_titles(child)
         elif isinstance(value, list):
@@ -401,6 +424,12 @@ def _catalog(status: dict[str, Any]) -> dict[str, Any]:
         "community_kinds": ["package", "workshop", "market"],
         "analysis_tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"],
         "limits": {"default_result_bytes": 12_288, "hard_result_bytes": 32_768, "max_list_items": 100, "review_text_default": 1_200, "review_text_max": 4_000},
+        "capabilities": {
+            "community_market": {
+                "status": status.get("community_market", "experimental"),
+                "note": "Steam may rate-limit server or shared cloud IPs.",
+            }
+        },
         "status": status,
     }
     if len(_json(value).encode()) > 8 * 1024:
@@ -412,17 +441,23 @@ def _operation_schema(operation: str) -> dict[str, Any]:
     tool, _, mode = operation.partition(".")
     schemas: dict[str, dict[str, Any]] = {
         "steam_game_get": {"views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"], "summary_store_select": ["appid", "name", "type", "is_free", "price", "initial_price", "discount_pct", "developers", "publishers", "release_date", "coming_soon", "genres", "categories", "features", "controller_support", "steam_deck", "platforms", "metacritic", "metacritic_url", "recommendations_total", "achievements_total", "dlc", "dlc_count", "required_age", "mature_content", "supported_languages", "full_audio_languages", "website", "short_description", "pc_requirements", "about_the_game"], "options": {"summary/store": ["include_requirements", "include_long_description"], "technical": ["section", "branch", "platform", "include_launch_options", "include_all_manifests"], "dlc": ["enrich", "on_sale_only"], "pricing": ["countries"]}, "technical_select": ["product", "branches", "depots", "current_build"], "achievements": "limit and cursor page items; select definitions and/or global_rates"},
-        "steam_player_get": {"views": ["profile", "social", "library", "wishlist", "progress", "inventory"], "player": "one reference, or 1-100 references for profile only; omitted uses STEAM_USER", "multi_profile_select": ["summary"], "progress_requires": "game"},
+        "steam_player_get": {"views": ["profile", "social", "library", "wishlist", "progress", "inventory"], "player": "one reference, or 1-100 references for profile only; omitted uses STEAM_USER", "select": {"profile": ["summary", "steam_id", "level", "bans", "badges"], "social": ["friends", "groups"], "progress": ["achievements", "stats", "rarest_unlocks"]}, "options": {"social": ["online_only", "enrich"], "library": ["scope", "sort_by", "include_free_games"], "wishlist": ["enrich", "on_sale_only"], "inventory": ["appid", "context_id"]}, "multi_profile_select": ["summary"], "progress_requires": "game"},
         "steam_search": {"modes": ["lookup", "discover", "deals", "chart"], "filters": {"lookup": [], "discover": ["tags", "max_price", "on_sale", "platform", "sort", "player", "exclude_owned", "released_within_days"], "deals": ["max_price", "min_discount"], "chart": ["section"]}, "pagination": {"discover": "signed cursor", "lookup/deals/chart": "bounded top_n_snapshot"}},
-        "steam_reviews_get": {"modes": ["summary", "page"], "filters": ["review_filter", "day_range", "sort_by", "review_type", "purchase_type", "language", "include_offtopic_activity", "include_author_id"]},
+        "steam_reviews_get": {"modes": ["summary", "page"], "filters": {"summary": ["review_filter", "day_range", "recent_max_reviews", "review_type", "purchase_type"], "page": ["sort_by", "review_type", "purchase_type", "include_offtopic_activity", "include_author_id"]}},
         "steam_community_get": {"kinds": ["package", "workshop", "market"], "market_options": ["appid", "market_hash_name", "currency", "include_item_details"], "market_currency": "integer Steam Market code 1-41"},
-        "steam_analyze": {"tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"], "review_insights": "partial, corpus_complete, stop_reason, signed continuation_cursor", "purchase_decision_language": "options.language selects readable feedback; official score remains all-language"},
+        "steam_analyze": {"tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"], "options": {key: sorted(value) for key, value in ANALYSIS_OPTIONS.items()}, "review_insights": "partial, corpus_complete, stop_reason, signed continuation_cursor", "purchase_decision_language": "options.language selects readable feedback; official score remains all-language"},
         "steam_job_get": {"fields": ["job_id", "cursor", "limit", "max_chars"], "large_object_results": "lossless JSON text chunks in items[].chunk; concatenate cursor pages before parsing"},
         "steam_job_cancel": {"fields": ["job_id"]},
     }
     if tool not in schemas:
         raise ServiceError(ErrorCode.NOT_FOUND, f"No schema for operation {operation!r}.")
-    return {"operation": tool, "mode": mode or None, **schemas[tool]}
+    return {
+        "operation": tool,
+        "mode": mode or None,
+        "locale_fields": ["language", "country"],
+        "unknown_nested_fields": "INVALID_ARGUMENT",
+        **schemas[tool],
+    }
 
 
 def _json(value: Any) -> str:

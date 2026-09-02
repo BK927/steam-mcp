@@ -119,6 +119,7 @@ def test_catalog_and_operation_schemas_are_bounded() -> None:
     catalog = resource_text(server, "steam://catalog")
     assert len(catalog.encode()) <= 8 * 1024
     assert json.loads(catalog)["tools"] == list(PUBLIC_TOOL_NAMES)
+    assert json.loads(catalog)["capabilities"]["community_market"]["status"] == "experimental"
     for operation in PUBLIC_TOOL_NAMES:
         schema = resource_text(server, f"steam://schema/{operation}")
         assert len(schema.encode()) <= 4 * 1024
@@ -158,6 +159,62 @@ def test_success_and_error_wire_shapes_are_exact() -> None:
         "details",
     }
     assert error["structuredContent"]["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert error["structuredContent"]["schema_uri"] == "steam://schema/steam_search.lookup"
+
+
+def test_strict_nested_contracts_reject_unknown_fields_before_provider_calls() -> None:
+    backend = FakeBackend()
+    server = make_server(backend)
+
+    analysis = call(
+        server,
+        "steam_analyze",
+        {"task": "game_overview", "refs": ["10"], "options": {"locale": {"country": "kr"}}},
+    )["structuredContent"]
+    assert analysis["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert analysis["schema_uri"] == "steam://schema/steam_analyze.game_overview"
+    assert analysis["details"]["unexpected"] == ["locale"]
+    assert "country" in analysis["details"]["allowed"]
+
+    player = call(
+        server,
+        "steam_player_get",
+        {"player": "alice", "view": "library", "options": {"foo": True}},
+    )["structuredContent"]
+    assert player["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert player["details"]["unexpected"] == ["foo"]
+
+    reviews = call(
+        server,
+        "steam_reviews_get",
+        {"game": 10, "mode": "page", "filters": {"day_range": 30}},
+    )["structuredContent"]
+    assert reviews["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert reviews["details"]["unexpected"] == ["day_range"]
+
+    locale = call(
+        server,
+        "steam_game_get",
+        {"game": 10, "locale": {"region": "KR"}},
+    )["structuredContent"]
+    assert locale["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert locale["schema_uri"] == "steam://schema/steam_game_get.summary"
+    assert locale["details"]["unexpected"] == ["region"]
+    assert backend.calls == []
+
+
+def test_technical_select_error_lists_allowed_sections() -> None:
+    result = call(
+        make_server(),
+        "steam_game_get",
+        {"game": 10, "view": "technical", "select": ["appid"]},
+    )["structuredContent"]
+    assert result["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert result["schema_uri"] == "steam://schema/steam_game_get.technical"
+    assert result["details"] == {
+        "unexpected": ["appid"],
+        "allowed": ["branches", "current_build", "depots", "product"],
+    }
 
 
 def test_player_array_contract_and_default_user_scope() -> None:

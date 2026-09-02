@@ -235,6 +235,35 @@ def test_discover_basic(monkeypatch):
     assert d["personalized"] is False
 
 
+def test_discover_fetches_exact_public_page_and_exposes_next_offset(monkeypatch):
+    captured = {}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        captured.update(params)
+        html = "".join(
+            f'<a data-ds-appid="{appid}"></a>' for appid in range(1, 31)
+        )
+        return {"success": 1, "total_count": 81, "results_html": html}
+
+    async def fake_app_prices(appids, cc):
+        return {appid: {"name": f"Game {appid}"} for appid in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    out = run(
+        S.steam_discover(
+            S.DiscoverInput(term="turn based", limit=30, response_format="json")
+        )
+    )
+    data = json.loads(out)
+    assert captured["start"] == 0
+    assert captured["count"] == 30
+    assert data["count"] == 30
+    assert data["scanned_count"] == 30
+    assert data["has_more"] is True
+    assert data["next_offset"] == 30
+
+
 def test_discover_explicit_tags(monkeypatch):
     captured = {}
 

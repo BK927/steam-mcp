@@ -8,6 +8,22 @@ from ..contracts import ErrorCode, ServiceError
 from .base import BaseService, bounded_limit, locale_values
 
 PLAYER_VIEWS = frozenset({"profile", "social", "library", "wishlist", "progress", "inventory"})
+PLAYER_OPTIONS = {
+    "profile": frozenset(),
+    "social": frozenset({"online_only", "enrich"}),
+    "library": frozenset({"scope", "sort_by", "include_free_games"}),
+    "wishlist": frozenset({"enrich", "on_sale_only"}),
+    "progress": frozenset(),
+    "inventory": frozenset({"appid", "context_id"}),
+}
+PLAYER_SELECT = {
+    "profile": frozenset({"summary", "steam_id", "level", "bans", "badges"}),
+    "social": frozenset({"friends", "groups"}),
+    "library": frozenset(),
+    "wishlist": frozenset(),
+    "progress": frozenset({"achievements", "stats", "rarest_unlocks"}),
+    "inventory": frozenset(),
+}
 
 
 class PlayerService(BaseService):
@@ -27,6 +43,76 @@ class PlayerService(BaseService):
                 ErrorCode.INVALID_ARGUMENT,
                 f"Unsupported player view: {view}.",
                 schema_uri=f"steam://schema/steam_player_get.{view}",
+            )
+        schema_uri = f"steam://schema/steam_player_get.{view}"
+        unexpected_options = sorted(set(options) - PLAYER_OPTIONS[view])
+        if unexpected_options:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported options for {view}: {', '.join(unexpected_options)}.",
+                schema_uri=schema_uri,
+                details={
+                    "unexpected": unexpected_options,
+                    "allowed": sorted(PLAYER_OPTIONS[view]),
+                },
+            )
+        unexpected_select = sorted(set(select) - PLAYER_SELECT[view])
+        if unexpected_select:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported select fields for {view}: {', '.join(unexpected_select)}.",
+                schema_uri=schema_uri,
+                details={
+                    "unexpected": unexpected_select,
+                    "allowed": sorted(PLAYER_SELECT[view]),
+                },
+            )
+        bool_options = {
+            "online_only", "enrich", "include_free_games", "on_sale_only"
+        }
+        invalid_bools = sorted(
+            key for key in options if key in bool_options and not isinstance(options[key], bool)
+        )
+        if invalid_bools:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Boolean options required: {', '.join(invalid_bools)}.",
+                schema_uri=schema_uri,
+                details={"invalid": invalid_bools},
+            )
+        if "appid" in options and (
+            isinstance(options["appid"], bool)
+            or not isinstance(options["appid"], int)
+            or options["appid"] < 1
+        ):
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.appid must be a positive integer.",
+                schema_uri=schema_uri,
+            )
+        if "context_id" in options and (
+            isinstance(options["context_id"], bool)
+            or not isinstance(options["context_id"], int)
+            or options["context_id"] < 1
+        ):
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.context_id must be a positive integer.",
+                schema_uri=schema_uri,
+            )
+        if "scope" in options and options["scope"] not in {"owned", "recent"}:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.scope must be owned or recent.",
+                schema_uri=schema_uri,
+                details={"allowed": ["owned", "recent"]},
+            )
+        if "sort_by" in options and options["sort_by"] not in {"playtime", "name"}:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                "options.sort_by must be playtime or name.",
+                schema_uri=schema_uri,
+                details={"allowed": ["name", "playtime"]},
             )
         players: list[str] | None = None
         if isinstance(player, list):

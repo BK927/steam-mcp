@@ -8,6 +8,16 @@ from ..contracts import ErrorCode, ServiceError
 from .base import BaseService, bounded_limit, locale_values
 
 
+REVIEW_FILTERS = {
+    "summary": frozenset(
+        {"review_filter", "day_range", "recent_max_reviews", "review_type", "purchase_type"}
+    ),
+    "page": frozenset(
+        {"sort_by", "review_type", "purchase_type", "include_offtopic_activity", "include_author_id"}
+    ),
+}
+
+
 class ReviewsService(BaseService):
     async def get(
         self,
@@ -25,6 +35,54 @@ class ReviewsService(BaseService):
                 f"Unsupported review mode: {mode}.",
                 schema_uri=f"steam://schema/steam_reviews_get.{mode}",
             )
+        schema_uri = f"steam://schema/steam_reviews_get.{mode}"
+        unexpected = sorted(set(filters) - REVIEW_FILTERS[mode])
+        if unexpected:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported filters for {mode}: {', '.join(unexpected)}.",
+                schema_uri=schema_uri,
+                details={
+                    "unexpected": unexpected,
+                    "allowed": sorted(REVIEW_FILTERS[mode]),
+                },
+            )
+        for key in ("include_offtopic_activity", "include_author_id"):
+            if key in filters and not isinstance(filters[key], bool):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"filters.{key} must be boolean.",
+                    schema_uri=schema_uri,
+                )
+        enums = {
+            "review_filter": {"all", "recent"},
+            "sort_by": {"recent", "updated"},
+            "review_type": {"all", "positive", "negative"},
+            "purchase_type": {"all", "steam", "non_steam_purchase"},
+        }
+        for key, allowed_values in enums.items():
+            if key in filters and filters[key] not in allowed_values:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"filters.{key} is not supported.",
+                    schema_uri=schema_uri,
+                    details={"allowed": sorted(allowed_values)},
+                )
+        integer_ranges = {
+            "day_range": (1, 365),
+            "recent_max_reviews": (0, 50_000),
+        }
+        for key, (minimum, maximum) in integer_ranges.items():
+            if key not in filters:
+                continue
+            value = filters[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"filters.{key} must be an integer between {minimum} and {maximum}.",
+                    schema_uri=schema_uri,
+                    details={"minimum": minimum, "maximum": maximum},
+                )
         language, country = locale_values(locale)
         appid = await self.appid(game, country, language)
         size = bounded_limit(limit, 20, 100)
