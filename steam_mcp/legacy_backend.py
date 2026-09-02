@@ -2482,7 +2482,10 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
         ach = data.get("achievementpercentages", {}).get("achievements", [])
         rows = sorted(
             (
-                {"api_name": a.get("name"), "global_pct": round(a.get("percent", 0), 2)}
+                {
+                    "api_name": a.get("name"),
+                    "global_pct": round(float(a.get("percent") or 0), 2),
+                }
                 for a in ach
             ),
             key=lambda r: r["global_pct"],
@@ -2630,7 +2633,7 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
         if not unlocked:
             return f"{sid} has no unlocked achievements in app {params.appid}."
         pct_map = {
-            g.get("name"): g.get("percent", 0.0)
+            g.get("name"): float(g.get("percent") or 0)
             for g in glob_data.get("achievementpercentages", {}).get("achievements", [])
         }
         rows = []

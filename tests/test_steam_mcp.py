@@ -2114,6 +2114,21 @@ def test_rarest_unlocks(monkeypatch):
     assert d["rarest"][0]["global_pct"] == 5.0
 
 
+def test_global_achievement_percentages_accepts_provider_strings(monkeypatch):
+    async def fake_steam(path, params, **kwargs):
+        return {"achievementpercentages": {"achievements": [
+            {"name": "RARE", "percent": "4.125"},
+            {"name": "COMMON", "percent": "80"},
+        ]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    result = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.AppOnlyInput(appid=1086940, response_format="json")
+    )))
+    assert result["achievements"][0] == {"api_name": "RARE", "global_pct": 4.12}
+    assert result["achievements"][1]["global_pct"] == 80.0
+
+
 def test_friends_who_own(monkeypatch):
     async def fake_steam(path, params, **k):
         if "GetFriendList" in path:
