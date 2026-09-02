@@ -162,7 +162,7 @@ def create_server(
             )
 
     @server.tool(
-        description="Read a Steam game across store, build, DLC, tags, achievements, live, news or pricing.",
+        description="Read Steam game store, build, DLC, tags, achievements, live, news or pricing data.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
@@ -184,7 +184,7 @@ def create_server(
         )
 
     @server.tool(
-        description="Read a Steam player view.",
+        description="Read Steam player data.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
@@ -214,7 +214,7 @@ def create_server(
         )
 
     @server.tool(
-        description="Look up titles or discover games, current deals and storefront charts.",
+        description="Find Steam titles, games, deals or charts.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
