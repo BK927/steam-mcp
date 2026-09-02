@@ -219,12 +219,32 @@ def test_cloud_tasks_payload_path_oidc_and_no_firestore_inputs() -> None:
         client=client,
     )
     run(runner.submit("job", {"task": "game_overview", "refs": ["10"], "options": {}}))
-    request = client.created[0]
+    request = client.created[0]["request"]
     assert request["parent"].endswith("/queues/steam-analysis")
-    http = request["task"]["http_request"]
+    task = request["task"]
+    assert task["name"].endswith("/queues/steam-analysis/tasks/job")
+    http = task["http_request"]
     assert http["url"].endswith("/internal/jobs/run")
     assert http["oidc_token"]["service_account_email"].startswith("tasks@")
     assert json.loads(http["body"])["payload"]["refs"] == ["10"]
+
+
+def test_cloud_tasks_duplicate_name_is_idempotent() -> None:
+    class DuplicateTasks(FakeTasks):
+        async def create_task(self, **request: Any) -> None:
+            self.created.append(request)
+            raise type("AlreadyExists", (Exception,), {})()
+
+    client = DuplicateTasks()
+    runner = CloudTasksJobRunner(
+        project="p",
+        location="asia-northeast1",
+        queue="steam-analysis",
+        worker_url="https://worker/internal/jobs/run",
+        client=client,
+    )
+    run(runner.submit("same-job", {"task": "game_overview", "refs": ["10"]}))
+    assert client.created[0]["request"]["task"]["name"].endswith("/tasks/same-job")
 
 
 async def endpoint_request(
@@ -282,6 +302,33 @@ class RetryRunner:
 
     async def submit(self, job_id: str, payload: dict[str, Any]) -> None:
         del job_id, payload
+
+
+class FailingSubmitRunner:
+    supports_retry = True
+
+    async def submit(self, job_id: str, payload: dict[str, Any]) -> None:
+        del job_id, payload
+        raise RuntimeError("queue unavailable")
+
+
+def test_analysis_submit_failure_marks_job_failed_and_returns_job_id() -> None:
+    store = MemoryJobStore()
+    service = AnalysisService(
+        RetryBackend(fail=False),
+        TtlLruCache(),
+        CursorCodec(b"q" * 32),
+        store,
+        MemoryResultStore(),
+        FailingSubmitRunner(),
+    )
+    with pytest.raises(ServiceError) as caught:
+        run(service.start("game_overview", ["10"], {}, "queue-failure"))
+    job_id = caught.value.details["job_id"]
+    job = run(store.get(job_id))
+    assert caught.value.code is ErrorCode.PROVIDER_UNAVAILABLE
+    assert job is not None and job.status == "failed"
+    assert job.progress["stage"] == "queue_failed"
 
 
 class RetryBackend:

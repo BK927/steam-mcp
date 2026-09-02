@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -24,6 +25,9 @@ from .services import (
 )
 from .services.base import Backend
 from .oauth import OAuthRuntime
+
+
+logger = logging.getLogger(__name__)
 
 
 PUBLIC_TOOL_NAMES = (
@@ -128,7 +132,14 @@ def create_server(
             )
         except ServiceError as exc:
             return error_result(exc)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Do not log arguments or exception text here: upstream request
+            # errors may contain credential-bearing URLs. Provider adapters
+            # emit narrowly redacted diagnostics when it is safe to do so.
+            logger.error(
+                "Unhandled Steam MCP tool failure error_type=%s",
+                type(exc).__name__,
+            )
             return error_result(
                 ServiceError(
                     ErrorCode.PROVIDER_UNAVAILABLE,

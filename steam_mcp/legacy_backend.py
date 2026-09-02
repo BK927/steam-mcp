@@ -197,10 +197,11 @@ CURRENCY_SYMBOLS = {
     "ILS": "₪", "KZT": "₸", "CRC": "₡",
 }
 
-# Steam store "supported player" category IDs that indicate co-op play, used to
-# detect co-op games from IStoreBrowseService/GetItems. 9=Co-op, 24=Shared/Split
-# Screen, 38=Online Co-op, 39=LAN Co-op.
+# Steam store category IDs are stable while descriptions are localized. Use
+# these IDs whenever appdetails exposes them and retain text matching only as a
+# fallback for incomplete provider responses.
 COOP_CATEGORY_IDS = {9, 24, 38, 39}
+MULTIPLAYER_CATEGORY_IDS = {1, 20, 27, 36, 37, 49}
 
 PROFILE_URL_RE = re.compile(r"steamcommunity\.com/(profiles|id)/([^/?#]+)", re.IGNORECASE)
 STEAMID64_RE = re.compile(r"^7656\d{13}$")  # 17-digit SteamID64 starting 7656
@@ -1012,6 +1013,17 @@ def _fmt_amount(amount: Optional[float], currency: Optional[str] = None) -> Opti
             return f"{sym}{amount:,.2f}"
         return f"{amount:,.2f} {currency.upper()}"
     return f"${amount:,.2f}"
+
+
+def _steam_price_major_units(value: Any) -> Optional[int | float]:
+    """Convert Steam's hundredths-based price integer to major currency units."""
+    if value is None:
+        return None
+    try:
+        amount = float(value) / 100
+    except (TypeError, ValueError):
+        return None
+    return int(amount) if amount.is_integer() else round(amount, 2)
 
 
 def _fmt_bytes(value: Optional[int]) -> str:
@@ -2694,15 +2706,17 @@ async def steam_search_apps(params: AppSearchInput) -> str:
             {"term": params.query, "l": params.language, "cc": params.country_code},
         )
         items = data.get("items", [])[: params.limit]
-        rows = [
-            {
-                "appid": it.get("id"),
-                "name": it.get("name"),
-                "price": (it.get("price") or {}).get("final"),
-                "currency": (it.get("price") or {}).get("currency"),
-            }
-            for it in items
-        ]
+        rows = []
+        for item in items:
+            price = item.get("price") or {}
+            rows.append(
+                {
+                    "appid": item.get("id"),
+                    "name": item.get("name"),
+                    "price": _steam_price_major_units(price.get("final")),
+                    "currency": price.get("currency"),
+                }
+            )
         if not rows:
             return f"No store results for '{params.query}'."
         if params.response_format == ResponseFormat.JSON:
@@ -2711,8 +2725,8 @@ async def steam_search_apps(params: AppSearchInput) -> str:
         lines = [f"# Store search: '{params.query}'", ""]
         for r in rows:
             price = ""
-            if r["price"]:
-                price = f" — {_fmt_amount(r['price'] / 100, r['currency'])}"
+            if r["price"] is not None:
+                price = f" — {_fmt_amount(r['price'], r['currency'])}"
             lines.append(f"- **{r['name']}** (appid {r['appid']}){price}")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
@@ -2771,11 +2785,20 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             return f"No store details found for app {params.appid}."
         d = entry.get("data", {})
 
-        cats = [c.get("description", "") for c in d.get("categories", [])]
+        category_rows = d.get("categories", [])
+        cats = [c.get("description", "") for c in category_rows]
         cats_l = [c.lower() for c in cats]
+        category_ids = {
+            int(c["id"])
+            for c in category_rows
+            if str(c.get("id", "")).isdigit()
+        }
 
         def _has(*subs):
             return any(any(sub in c for c in cats_l) for sub in subs)
+
+        def _has_id(*ids):
+            return bool(category_ids.intersection(ids))
 
         price = d.get("price_overview") or {}
         platforms = [k for k, v in (d.get("platforms") or {}).items() if v]
@@ -2789,19 +2812,22 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         pcr = pcr if isinstance(pcr, dict) else {}
 
         features = {
-            "is_singleplayer": _has("single-player"),
-            "is_multiplayer": _has("multi-player", "pvp", "mmo"),
-            "is_coop": _has("co-op"),
-            "is_online_coop": _has("online co-op"),
-            "is_local_coop": _has("shared/split screen co-op", "local co-op"),
+            "is_singleplayer": _has_id(2) or _has("single-player"),
+            "is_multiplayer": _has_id(*MULTIPLAYER_CATEGORY_IDS)
+            or _has("multi-player", "pvp", "mmo"),
+            "is_coop": _has_id(*COOP_CATEGORY_IDS) or _has("co-op"),
+            "is_online_coop": _has_id(38) or _has("online co-op"),
+            "is_local_coop": _has_id(24, 39)
+            or _has("shared/split screen co-op", "local co-op"),
             "has_controller_support": d.get("controller_support") in ("full", "partial")
+            or _has_id(18, 28)
             or _has("controller support"),
-            "has_cloud_saves": _has("steam cloud"),
-            "has_trading_cards": _has("trading cards"),
-            "has_achievements": _has("steam achievements")
+            "has_cloud_saves": _has_id(23) or _has("steam cloud"),
+            "has_trading_cards": _has_id(29) or _has("trading cards"),
+            "has_achievements": _has_id(22) or _has("steam achievements")
             or bool((d.get("achievements") or {}).get("total")),
-            "remote_play_together": _has("remote play together"),
-            "family_sharing": _has("family sharing"),
+            "remote_play_together": _has_id(44) or _has("remote play together"),
+            "family_sharing": _has_id(62) or _has("family sharing"),
             "vr_support": _has("vr "),
             "anti_cheat": _has("anti-cheat"),
         }

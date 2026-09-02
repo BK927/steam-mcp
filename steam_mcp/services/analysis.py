@@ -68,7 +68,31 @@ class AnalysisService(BaseService):
         payload = {"task": task, "refs": refs, "options": options}
         job = await self.job_store.create(task, refs, options, request_id or None)
         if job.status == "queued":
-            await self.runner.submit(job.job_id, payload)
+            try:
+                await self.runner.submit(job.job_id, payload)
+            except Exception as exc:  # noqa: BLE001
+                error = {
+                    "code": ErrorCode.PROVIDER_UNAVAILABLE.value,
+                    "message": "The analysis job could not be queued.",
+                    "retryable": True,
+                    "schema_uri": None,
+                    "details": {"job_id": job.job_id},
+                }
+                try:
+                    await self.job_store.update(
+                        job.job_id,
+                        status="failed",
+                        progress={"stage": "queue_failed", "percent": 0},
+                        error=error,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                raise ServiceError(
+                    ErrorCode.PROVIDER_UNAVAILABLE,
+                    "The analysis job could not be queued.",
+                    retryable=True,
+                    details={"job_id": job.job_id},
+                ) from exc
             job = await self._require_job(job.job_id)
         return job_envelope(self.public_job(job))
 

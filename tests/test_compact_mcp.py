@@ -389,10 +389,7 @@ def assert_backend_calls(
         (
             "achievements",
             {},
-            [
-                ("steam_get_game_schema", {"appid": 10}),
-                ("steam_get_global_achievement_percentages", {"appid": 10}),
-            ],
+            [("steam_get_global_achievement_percentages", {"appid": 10})],
         ),
         ("live", {}, [("steam_get_current_players", {"appid": 10})]),
         ("news", {}, [("steam_get_app_news", {"appid": 10})]),

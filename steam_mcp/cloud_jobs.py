@@ -12,11 +12,15 @@ import gzip
 import hashlib
 import inspect
 import json
+import logging
 import secrets
 from typing import Any
 
 from .contracts import ErrorCode, ServiceError
 from .jobs import JobRecord, TERMINAL_STATES
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _invoke(value: Any, *args: Any, **kwargs: Any) -> Any:
@@ -320,7 +324,32 @@ class CloudTasksJobRunner:
                 "service_account_email": self.service_account_email,
                 "audience": self.worker_url,
             }
-        await _invoke(self.client.create_task, parent=self.parent, task={"http_request": request})
+        task = {
+            # A stable name makes retries after ambiguous API responses
+            # idempotent instead of dispatching the same analysis twice.
+            "name": f"{self.parent}/tasks/{job_id}",
+            "http_request": request,
+        }
+        try:
+            # The async client's flattened ``task=`` parameter expects a Task
+            # proto. A mapping is supported only as the top-level request.
+            await _invoke(
+                self.client.create_task,
+                request={"parent": self.parent, "task": task},
+            )
+        except Exception as exc:  # noqa: BLE001
+            if type(exc).__name__ == "AlreadyExists":
+                return
+            message = str(exc)
+            if self.worker_token:
+                message = message.replace(self.worker_token, "<redacted>")
+            logger.error(
+                "Cloud Tasks submit failed job_id=%s error_type=%s error=%s",
+                job_id,
+                type(exc).__name__,
+                message[:1_000],
+            )
+            raise
 
 
 class WorkerEndpoint:

@@ -129,7 +129,15 @@ class GameService(BaseService):
             )
             preferred = ("tags",)
         elif view == "achievements":
-            sections = select or ["definitions", "global_rates"]
+            # Global rates are keyless. Definitions use GetSchemaForGame and
+            # remain an explicit opt-in when STEAM_API_KEY is absent.
+            sections = select or ["global_rates"]
+            allowed = {"definitions", "global_rates"}
+            if set(sections) - allowed:
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Select definitions and/or global_rates.",
+                )
             data = {}
             if "definitions" in sections:
                 data["definitions"] = await self.call("steam_get_game_schema", {"appid": appid})

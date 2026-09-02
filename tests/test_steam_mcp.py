@@ -1384,6 +1384,34 @@ def test_app_details_features(monkeypatch):
     assert d["steam_deck"] == "Verified"                  # inline Deck enrichment
 
 
+def test_app_details_features_use_ids_with_localized_descriptions(monkeypatch):
+    data = {"391540": {"success": True, "data": {
+        "name": "언더테일", "type": "game", "is_free": False,
+        "categories": [
+            {"id": 2, "description": "싱글 플레이어"},
+            {"id": 29, "description": "Steam 트레이딩 카드"},
+            {"id": 62, "description": "가족 공유"},
+        ],
+        "genres": [], "platforms": {"windows": True},
+        "release_date": {}, "supported_languages": "한국어",
+    }}}
+
+    async def fake_store(path, params, cache_ttl=0):
+        return data
+
+    async def fake_deck(appid, language="english"):
+        return None
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_deck_compat", fake_deck)
+    result = json.loads(run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=391540, language="koreana", response_format="json")
+    )))
+    assert result["features"]["is_singleplayer"] is True
+    assert result["features"]["has_trading_cards"] is True
+    assert result["features"]["family_sharing"] is True
+
+
 def test_deck_compatibility(monkeypatch):
     report = {"success": 1, "results": {
         "appid": 730, "resolved_category": 2,  # 2 = Playable
@@ -1879,6 +1907,21 @@ def test_search_apps_currency(monkeypatch):
     monkeypatch.setattr(S, "_store_get", fake_store)
     out = run(S.steam_search_apps(S.AppSearchInput(query="g", country_code="de")))
     assert "€19.99" in out and "$" not in out
+
+
+def test_search_apps_json_normalizes_krw_price(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"items": [
+            {"id": 391540, "name": "Undertale",
+             "price": {"currency": "KRW", "final": 1_050_000}}
+        ]}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    result = json.loads(run(S.steam_search_apps(S.AppSearchInput(
+        query="undertale", country_code="kr", response_format="json"
+    ))))
+    assert result["results"][0]["price"] == 10_500
+    assert result["results"][0]["currency"] == "KRW"
 
 
 def test_featured_specials_currency(monkeypatch):
