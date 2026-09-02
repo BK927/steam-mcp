@@ -41,6 +41,7 @@ from urllib.parse import quote, urlsplit
 import httpx2
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .contracts import CooperativeCancellation
 from .product_info import (
     depot_matches_platform,
     extract_app_info,
@@ -384,15 +385,10 @@ def _get_api_key() -> str:
             f"{ENV_KEY} in your MCP client config (or a .env file next to the "
             f"project); a free key takes a minute at "
             f"https://steamcommunity.com/dev/apikey\n\n"
-            f"Meanwhile {len(KEYLESS_TOOLS)} tools work without one — including "
-            f"steam_search_apps, steam_analyze_game, steam_get_app_reviews and "
-            f"steam_get_product_info for anything about the store or a game "
-            f"itself, steam_get_current_players for live player counts, and "
-            f"steam_get_global_achievement_percentages for achievement rarity. "
-            f"The game-finders (steam_discover, steam_should_i_buy, "
-            f"steam_recommend) also work without a key as long as you don't pass "
-            f"a steamid. Only data tied to a specific *account* (libraries, "
-            f"playtime, friends, personal achievements) needs the key."
+            f"Keyless game and store research remains available through the public "
+            f"steam_search, steam_game_get, steam_reviews_get, steam_community_get, "
+            f"and steam_analyze tools. Only data tied to a specific account "
+            f"(libraries, playtime, friends, and personal achievements) needs the key."
         )
     return key
 
@@ -839,6 +835,8 @@ def _exception_host(e: Exception) -> str:
 
 def _handle_error(e: Exception) -> str:
     """Consistent, actionable error formatting across all tools."""
+    if isinstance(e, CooperativeCancellation):
+        raise e
     if isinstance(e, SteamApiError):
         return _scrub(f"Error: {e}")
     if isinstance(e, httpx2.HTTPStatusError):
@@ -6773,6 +6771,13 @@ class ShouldIBuyInput(BaseModel):
         "tags match your most-played games. SteamID64, vanity, or profile URL.",
     )
     country_code: str = Field(default="us", min_length=2, max_length=2)
+    language: str = Field(
+        default="all",
+        min_length=2,
+        max_length=32,
+        description="Language for the readable-feedback comparison. Official Steam "
+        "scores remain all-language and Steam-purchase-only.",
+    )
     recent_max_reviews: int = Field(
         default=DEFAULT_RECENT_SCAN_LIMIT,
         description="Review budget for each 30-day trend scan. Set 0 for exact "
@@ -6794,15 +6799,16 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
     """Decide whether to buy ONE specific game — price, recent + lifetime reviews, tags, Metacritic, and taste match in one call; for evaluating a single known game, not finding new ones.
 
     Fuses the decision-relevant signals: current price/discount, Steam's official
-    all-language purchase-only lifetime and last-30-days scores, a separate all-
-    readable-feedback view, top community tags, Metacritic, and release status.
+    all-language purchase-only lifetime and last-30-days scores, a separate
+    caller-selected readable-feedback view, top community tags, Metacritic, and
+    release status.
     Pass a steamid
     to personalize — whether you already own it and which of its tags match your
     most-played games. Returns the facts for a reasoned call (it does not hard-code
     a yes/no). The store data needs no API key; personalization does.
 
     Args:
-        params (ShouldIBuyInput): appid, steamid, country_code.
+        params (ShouldIBuyInput): appid, steamid, country_code, language.
 
     Returns:
         str: Markdown brief or JSON — price, reviews (lifetime + recent + trend),
@@ -6813,14 +6819,14 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
         details, official_rev, feedback_rev, tags_map = await asyncio.gather(
             _store_get(
                 "appdetails",
-                {"appids": params.appid, "cc": cc, "l": "english"},
+                {"appids": params.appid, "cc": cc, "l": params.language},
                 cache_ttl=CACHE_TTL_APPDETAILS,
             ),
             _review_summary_query(
                 params.appid, language="all", purchase_type="steam", cc=cc
             ),
             _review_summary_query(
-                params.appid, language="all", purchase_type="all", cc=cc
+                params.appid, language=params.language, purchase_type="all", cc=cc
             ),
             _items_tags([params.appid]),
         )
@@ -6841,7 +6847,7 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
         )
         feedback_lifetime = _normalize_review_summary(
             feedback_rev,
-            language="all",
+            language=params.language,
             purchase_type="all",
             official_store_score=False,
         )
@@ -6858,7 +6864,7 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
                 params.appid,
                 30,
                 cc,
-                language="all",
+                language=params.language,
                 purchase_type="all",
                 max_reviews=params.recent_max_reviews,
             ),
@@ -6948,7 +6954,7 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
         )
         feedback_lt = summary["review_feedback_lifetime"]
         lines.append(
-            f"- **All readable feedback (lifetime)**: "
+            f"- **Readable feedback ({params.language}; lifetime)**: "
             f"{feedback_lt['review_score_desc'] or 'n/a'} — "
             f"{feedback_lt['positive_pct']}% of {feedback_lt['total_reviews']:,}"
         )
@@ -6971,7 +6977,7 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
                 else ""
             )
             lines.append(
-                f"- **All readable feedback (last 30d)**: "
+                f"- **Readable feedback ({params.language}; last 30d)**: "
                 f"{feedback_rc['positive_pct']}% of "
                 f"{feedback_rc['reviews_counted']:,}{samp}"
             )

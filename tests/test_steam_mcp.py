@@ -351,7 +351,9 @@ def test_should_i_buy(monkeypatch):
     monkeypatch.setattr(S, "_raw_get", fake_raw)
     monkeypatch.setattr(S, "_items_tags", fake_items)
     monkeypatch.setattr(S, "_tag_name_map", fake_map)
-    out = run(S.steam_should_i_buy(S.ShouldIBuyInput(appid=5, response_format="json")))
+    out = run(S.steam_should_i_buy(S.ShouldIBuyInput(
+        appid=5, language="koreana", response_format="json"
+    )))
     d = json.loads(out)
     assert d["name"] == "Game5"
     assert d["discount_pct"] == 50
@@ -363,13 +365,14 @@ def test_should_i_buy(monkeypatch):
         "offtopic_activity_included": False,
     }
     assert d["review_feedback_lifetime"]["positive_pct"] == 85.0
+    assert d["review_feedback_lifetime"]["scope"]["language"] == "koreana"
     assert d["review_recent_30d"]["positive_pct"] == 66.7   # 2 of 3 in-window
     assert d["review_recent_30d"]["reviews_counted"] == 3
     assert d["review_trend_pts"] == round(66.7 - 90.0, 1)
     assert d["top_tags"] == ["Action", "Indie"]
     assert d["personal"] is None                            # no steamid
     assert {(c["language"], c["purchase_type"]) for c in review_calls} == {
-        ("all", "steam"), ("all", "all")
+        ("all", "steam"), ("koreana", "all")
     }
 
 
@@ -2565,12 +2568,14 @@ def test_missing_key_error_points_at_the_keyless_alternatives(monkeypatch):
         S._get_api_key()
     msg = str(e.value)
     assert "steamcommunity.com/dev/apikey" in msg
-    assert str(len(S.KEYLESS_TOOLS)) in msg
-    # names it suggests must actually be keyless, or the advice sends the model
-    # straight into another error
-    usable = set(S.KEYLESS_TOOLS) | set(S.PARTLY_KEYLESS_TOOLS)
-    for name in re.findall(r"steam_[a-z_]+", msg):
-        assert name in usable, name
+    assert {
+        "steam_search",
+        "steam_game_get",
+        "steam_reviews_get",
+        "steam_community_get",
+        "steam_analyze",
+    } <= set(re.findall(r"steam_[a-z_]+", msg))
+    assert not (set(re.findall(r"steam_[a-z_]+", msg)) & set(S.KEYLESS_TOOLS))
 
 
 def test_readme_key_column_matches_the_code():

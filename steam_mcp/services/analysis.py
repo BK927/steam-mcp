@@ -6,7 +6,13 @@ from datetime import datetime, timezone
 import time
 from typing import Any
 
-from ..contracts import ErrorCode, ServiceError, bounded_value, job_envelope
+from ..contracts import (
+    CooperativeCancellation,
+    ErrorCode,
+    ServiceError,
+    bounded_value,
+    job_envelope,
+)
 from ..jobs import JobRecord, JobRunner, JobStore, ResultStore, TERMINAL_STATES
 from .base import BaseService, bounded_limit, provider_checkpoint_scope
 
@@ -22,10 +28,6 @@ ANALYSIS_TASKS = frozenset(
         "coop_plan",
     }
 )
-
-
-class _Cancelled(Exception):
-    pass
 
 
 class RetryableJobError(Exception):
@@ -125,8 +127,13 @@ class AnalysisService(BaseService):
                 result_ref=result_ref,
                 error=None,
             )
-        except _Cancelled:
-            await self.job_store.update(job_id, status="cancelled")
+        except CooperativeCancellation:
+            await self.job_store.update(
+                job_id,
+                status="cancelled",
+                progress={"stage": "cancelled"},
+                error=None,
+            )
         except ServiceError as exc:
             error = {
                 "code": exc.code.value,
@@ -241,6 +248,7 @@ class AnalysisService(BaseService):
                     "appid": appid,
                     "steamid": self._user(refs[1]) if len(refs) > 1 else options.get("player"),
                     "country_code": options.get("country", "us"),
+                    "language": options.get("language", "all"),
                     "recent_max_reviews": int(options.get("recent_max_reviews", 600)),
                 },
                 ttl=120,
@@ -279,7 +287,28 @@ class AnalysisService(BaseService):
     async def _review_insights(
         self, appid: int, options: dict[str, Any], job_id: str | None
     ) -> dict[str, Any]:
-        cursor = str(options.get("cursor") or "*")
+        cursor_filters = {
+            "appid": appid,
+            "sort_by": options.get("sort_by", "recent"),
+            "review_type": options.get("review_type", "all"),
+            "purchase_type": options.get("purchase_type", "all"),
+            "language": options.get("language", "all"),
+            "include_offtopic_activity": bool(
+                options.get("include_offtopic_activity", False)
+            ),
+            "include_author_id": bool(options.get("include_author_id", False)),
+            "country": options.get("country", "us"),
+        }
+        public_cursor = str(options.get("cursor") or "")
+        if public_cursor and public_cursor != "*":
+            cursor_state = self.cursor.decode(
+                public_cursor,
+                scope="analysis:review_insights",
+                filters=cursor_filters,
+            )
+            cursor = str(cursor_state.get("provider_cursor") or "*")
+        else:
+            cursor = "*"
         max_reviews = max(1, min(int(options.get("max_reviews", 5_000)), 50_000))
         max_pages = int(options.get("max_pages", 0))
         max_seconds = int(options.get("max_seconds", 0))
@@ -329,8 +358,14 @@ class AnalysisService(BaseService):
             if job_id:
                 await self._checkpoint(job_id)
             if not page_info.get("has_more") or not next_cursor:
+                stop_reason = "end_of_corpus"
+                cursor = ""
                 break
             cursor = str(next_cursor)
+            if scanned >= max_reviews:
+                stop_reason = "max_reviews"
+                break
+        partial = stop_reason != "end_of_corpus"
         return {
             "appid": appid,
             "reviews_scanned": scanned,
@@ -340,14 +375,21 @@ class AnalysisService(BaseService):
             "languages": languages,
             "pages_fetched": pages,
             "stop_reason": stop_reason,
-            "continuation_cursor": cursor if stop_reason != "end_of_corpus" else None,
+            "partial": partial,
+            "corpus_complete": not partial,
+            "complete_for_requested_scope": not partial,
+            "continuation_cursor": self.cursor.encode(
+                scope="analysis:review_insights",
+                filters=cursor_filters,
+                state={"provider_cursor": cursor},
+            ) if partial and cursor else None,
             "samples": samples,
         }
 
     async def _checkpoint(self, job_id: str) -> None:
         job = await self._require_job(job_id)
         if job.status in {"cancel_requested", "cancelled"}:
-            raise _Cancelled()
+            raise CooperativeCancellation()
 
     async def get(self, job_id: str, cursor: str, limit: int, max_chars: int) -> dict[str, Any]:
         job = await self._require_job(job_id)
@@ -355,6 +397,7 @@ class AnalysisService(BaseService):
         if job.status != "succeeded" or not job.result_ref:
             return envelope
         result = await self.result_store.get(job.result_ref)
+        envelope["meta"]["untrusted_fields"] = self._untrusted_fields(job.task)
         page_limit = bounded_limit(limit, 20, 100)
         offset = 0
         filters = {"job_id": job_id, "limit": page_limit}
@@ -427,3 +470,18 @@ class AnalysisService(BaseService):
                 if isinstance(value, list) and len(value) > 20:
                     return value, {k: v for k, v in result.items() if k != key}
         return None, result
+
+    @staticmethod
+    def _untrusted_fields(task: str) -> list[str]:
+        if task == "review_insights":
+            return [
+                "data.samples[].review",
+                "data.samples[].developer_response",
+            ]
+        if task == "game_overview":
+            return [
+                "data.reviews.reviews[].excerpt",
+                "data.news.news[].title",
+                "data.news.news[].contents",
+            ]
+        return []

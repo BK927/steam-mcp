@@ -147,6 +147,29 @@ class GameService(BaseService):
                 )
             if not data:
                 raise ServiceError(ErrorCode.INVALID_ARGUMENT, "Select definitions and/or global_rates.")
+            achievement_items: list[dict[str, Any]] = []
+            section_meta: dict[str, Any] = {}
+            for section, value in data.items():
+                achievements = value.get("achievements") if isinstance(value, dict) else None
+                if isinstance(value, dict):
+                    section_meta[section] = {
+                        key: item for key, item in value.items() if key != "achievements"
+                    }
+                if isinstance(achievements, list):
+                    achievement_items.extend(
+                        {"section": section, **achievement}
+                        for achievement in achievements
+                    )
+            selected = achievement_items[offset:offset + size]
+            has_more = offset + len(selected) < len(achievement_items)
+            data = {
+                "appid": appid,
+                "sections": sections,
+                "section_meta": section_meta,
+                "total": len(achievement_items),
+                "achievements": selected,
+            }
+            preferred = ("achievements",)
         elif view == "live":
             data = await self.call("steam_get_current_players", {"appid": appid}, ttl=60)
         elif view == "news":

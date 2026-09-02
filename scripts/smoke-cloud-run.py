@@ -43,6 +43,29 @@ async def smoke(url: str, app_id: int) -> None:
             if result.is_error:
                 raise RuntimeError("representative keyless steam_game_get returned isError")
 
+            achievements = await client.call_tool(
+                "steam_game_get",
+                {"game": app_id, "view": "achievements", "limit": 1},
+                read_timeout_seconds=60,
+            )
+            achievement_body = achievements.structured_content or {}
+            if achievements.is_error or len(achievement_body.get("items") or []) != 1:
+                raise RuntimeError("achievement limit did not return exactly one item")
+            if not (achievement_body.get("page") or {}).get("next_cursor"):
+                raise RuntimeError("achievement page did not return a signed continuation")
+
+            invalid_filter = await client.call_tool(
+                "steam_search",
+                {
+                    "mode": "deals",
+                    "filters": {"__unknown_filter": True},
+                },
+                read_timeout_seconds=60,
+            )
+            invalid_body = invalid_filter.structured_content or {}
+            if not invalid_filter.is_error or invalid_body.get("code") != "INVALID_ARGUMENT":
+                raise RuntimeError("unknown deal filter was not rejected")
+
             analysis = await client.call_tool(
                 "steam_analyze",
                 {
@@ -69,12 +92,64 @@ async def smoke(url: str, app_id: int) -> None:
                 job = status_result.structured_content.get("job") or {}
                 status = str(job.get("status") or "")
                 if status == "succeeded":
+                    data = status_result.structured_content.get("data") or {}
+                    meta = status_result.structured_content.get("meta") or {}
+                    if data.get("stop_reason") != "max_reviews":
+                        raise RuntimeError("review analysis did not report max_reviews")
+                    if data.get("partial") is not True or data.get("corpus_complete") is not False:
+                        raise RuntimeError("review analysis completeness flags are invalid")
+                    if not data.get("continuation_cursor"):
+                        raise RuntimeError("review analysis returned no signed continuation")
+                    if "data.samples[].review" not in (meta.get("untrusted_fields") or []):
+                        raise RuntimeError("review analysis lost its untrusted-field marker")
                     break
                 if status in {"failed", "cancelled"}:
                     raise RuntimeError(f"analysis smoke job ended as {status}")
                 await asyncio.sleep(2)
             else:
                 raise RuntimeError("analysis smoke job did not finish within 90 seconds")
+
+            cancel_job = await client.call_tool(
+                "steam_analyze",
+                {
+                    "task": "review_insights",
+                    "refs": [str(app_id)],
+                    "options": {"max_reviews": 50_000},
+                    "request_id": f"cloud-cancel-smoke-{uuid.uuid4().hex}",
+                },
+                read_timeout_seconds=60,
+            )
+            cancel_job_id = str(
+                ((cancel_job.structured_content or {}).get("job") or {}).get("job_id") or ""
+            )
+            if cancel_job.is_error or not cancel_job_id:
+                raise RuntimeError("cancellation smoke job was not created")
+            cancelled = await client.call_tool(
+                "steam_job_cancel",
+                {"job_id": cancel_job_id},
+                read_timeout_seconds=60,
+            )
+            if cancelled.is_error:
+                raise RuntimeError("steam_job_cancel failed")
+            for _ in range(45):
+                cancelled_status = await client.call_tool(
+                    "steam_job_get",
+                    {"job_id": cancel_job_id, "limit": 1, "max_chars": 1_000},
+                    read_timeout_seconds=60,
+                )
+                cancelled_job = (cancelled_status.structured_content or {}).get("job") or {}
+                status = str(cancelled_job.get("status") or "")
+                if status == "cancelled":
+                    if cancelled_job.get("progress") != {"stage": "cancelled"}:
+                        raise RuntimeError("cancelled job has the wrong progress stage")
+                    if cancelled_job.get("error") is not None:
+                        raise RuntimeError("cancelled job retained an error")
+                    break
+                if status in {"succeeded", "failed"}:
+                    raise RuntimeError(f"cancelled smoke job ended as {status}")
+                await asyncio.sleep(2)
+            else:
+                raise RuntimeError("cancelled smoke job did not settle within 90 seconds")
 
 
 def main() -> None:
@@ -83,7 +158,10 @@ def main() -> None:
     parser.add_argument("--app-id", type=int, default=570)
     args = parser.parse_args()
     asyncio.run(smoke(args.url, args.app_id))
-    print("Steam MCP SDK smoke passed: exact 8 tools, keyless game call, and Cloud job.")
+    print(
+        "Steam MCP SDK smoke passed: exact 8 tools, keyless reads, signed paging, "
+        "Cloud analysis metadata, and cooperative cancellation."
+    )
 
 
 if __name__ == "__main__":

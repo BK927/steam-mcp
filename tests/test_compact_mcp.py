@@ -477,6 +477,67 @@ def test_all_search_modes_route_to_legacy_operations(
     assert_backend_calls(backend, expected)
 
 
+def test_deals_apply_supported_filters_and_reject_unknown_filters() -> None:
+    class DealsBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_featured_specials":
+                return {
+                    "country": "kr",
+                    "count": 3,
+                    "specials": [
+                        {"appid": 1, "final_price": 1, "discount_pct": 99},
+                        {"appid": 2, "final_price": 63_200, "discount_pct": 20},
+                        {"appid": 3, "final_price": 0.5, "discount_pct": 50},
+                    ],
+                }
+            return await super().call(operation, arguments)
+
+    backend = DealsBackend()
+    result = call(
+        make_server(backend),
+        "steam_search",
+        {
+            "mode": "deals",
+            "filters": {"max_price": 1, "min_discount": 99},
+            "locale": {"country": "kr"},
+        },
+    )
+    assert result["isError"] is False
+    assert [item["appid"] for item in result["structuredContent"]["items"]] == [1]
+    assert backend.calls[0][1]["limit"] == 50
+
+    impossible = call(
+        make_server(DealsBackend()),
+        "steam_search",
+        {
+            "mode": "deals",
+            "filters": {"max_price": 0, "min_discount": 100},
+        },
+    )
+    assert impossible["structuredContent"]["kind"] == "collection"
+    assert impossible["structuredContent"]["items"] == []
+
+    unknown = call(
+        make_server(),
+        "steam_search",
+        {
+            "mode": "deals",
+            "filters": {"max_price": 1, "__unknown_filter": True},
+        },
+    )
+    assert unknown["isError"] is True
+    assert unknown["structuredContent"]["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert "__unknown_filter" in unknown["structuredContent"]["message"]
+
+    invalid = call(
+        make_server(),
+        "steam_search",
+        {"mode": "deals", "filters": {"min_discount": 101}},
+    )
+    assert invalid["structuredContent"]["code"] == ErrorCode.INVALID_ARGUMENT.value
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [
@@ -526,6 +587,42 @@ def test_all_community_kinds_route_to_legacy_operations(
     )
     assert result["isError"] is False
     assert_backend_calls(backend, expected)
+
+
+def test_workshop_trust_and_market_option_validation() -> None:
+    workshop = call(
+        make_server(),
+        "steam_community_get",
+        {"kind": "workshop", "ref": "123"},
+    )
+    assert workshop["structuredContent"]["meta"]["untrusted_fields"] == [
+        "data.title",
+        "data.description",
+        "data.tags[]",
+    ]
+
+    currency = call(
+        make_server(),
+        "steam_community_get",
+        {
+            "kind": "market",
+            "ref": "Item",
+            "options": {"appid": 730, "currency": "KRW"},
+        },
+    )
+    assert currency["structuredContent"]["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert "integer Steam Market currency code" in currency["structuredContent"]["message"]
+
+    unknown = call(
+        make_server(),
+        "steam_community_get",
+        {
+            "kind": "market",
+            "ref": "Item",
+            "options": {"appid": 730, "unknown": True},
+        },
+    )
+    assert unknown["structuredContent"]["code"] == ErrorCode.INVALID_ARGUMENT.value
 
 
 @pytest.mark.parametrize(
@@ -603,3 +700,112 @@ def test_all_analysis_tasks_route_to_legacy_operations(
     assert result["isError"] is False
     assert result["structuredContent"]["job"]["status"] == "succeeded"
     assert_backend_calls(backend, expected)
+
+
+def test_review_insights_reports_partial_signed_continuation_and_trust() -> None:
+    backend = FakeBackend()
+    server = make_server(backend)
+    started = call(
+        server,
+        "steam_analyze",
+        {
+            "task": "review_insights",
+            "refs": ["10"],
+            "options": {"max_reviews": 1},
+        },
+    )
+    job_id = started["structuredContent"]["job"]["job_id"]
+    result = call(server, "steam_job_get", {"job_id": job_id})["structuredContent"]
+    assert result["data"]["reviews_scanned"] == 1
+    assert result["data"]["stop_reason"] == "max_reviews"
+    assert result["data"]["partial"] is True
+    assert result["data"]["corpus_complete"] is False
+    assert result["data"]["complete_for_requested_scope"] is False
+    continuation = result["data"]["continuation_cursor"]
+    assert continuation and continuation != "upstream-2"
+    assert result["meta"]["untrusted_fields"] == [
+        "data.samples[].review",
+        "data.samples[].developer_response",
+    ]
+
+    resumed = call(
+        server,
+        "steam_analyze",
+        {
+            "task": "review_insights",
+            "refs": ["10"],
+            "options": {"max_reviews": 1, "cursor": continuation},
+        },
+    )
+    assert resumed["isError"] is False
+    review_calls = [call for call in backend.calls if call[0] == "steam_get_app_review_batch"]
+    assert review_calls[-1][1]["cursor"] == "upstream-2"
+
+
+def test_review_insights_marks_actual_end_of_corpus() -> None:
+    class EndBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_app_review_batch":
+                return {
+                    "reviews": [{"review": "last", "voted_up": True}],
+                    "page": {"has_more": False, "next_cursor": None},
+                }
+            return {"operation": operation, "arguments": arguments}
+
+    server = make_server(EndBackend())
+    started = call(
+        server,
+        "steam_analyze",
+        {
+            "task": "review_insights",
+            "refs": ["10"],
+            "options": {"max_reviews": 10},
+        },
+    )
+    job_id = started["structuredContent"]["job"]["job_id"]
+    data = call(server, "steam_job_get", {"job_id": job_id})["structuredContent"]["data"]
+    assert data["stop_reason"] == "end_of_corpus"
+    assert data["partial"] is False
+    assert data["corpus_complete"] is True
+    assert data["continuation_cursor"] is None
+
+
+def test_achievement_limit_and_signed_cursor_page_nested_sections() -> None:
+    class AchievementBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            if operation == "steam_get_global_achievement_percentages":
+                return {
+                    "appid": arguments["appid"],
+                    "achievements": [
+                        {"api_name": "ONE", "global_pct": 90.0},
+                        {"api_name": "TWO", "global_pct": 50.0},
+                        {"api_name": "THREE", "global_pct": 10.0},
+                    ],
+                }
+            return await super().call(operation, arguments)
+
+    server = make_server(AchievementBackend())
+    first = call(
+        server,
+        "steam_game_get",
+        {"game": 10, "view": "achievements", "limit": 1},
+    )["structuredContent"]
+    assert [row["api_name"] for row in first["items"]] == ["ONE"]
+    assert first["items"][0]["section"] == "global_rates"
+    assert first["page"]["returned"] == 1
+    assert first["page"]["has_more"] is True
+    assert first["page"]["next_cursor"]
+
+    second = call(
+        server,
+        "steam_game_get",
+        {
+            "game": 10,
+            "view": "achievements",
+            "limit": 1,
+            "cursor": first["page"]["next_cursor"],
+        },
+    )["structuredContent"]
+    assert second["items"][0]["api_name"] == "TWO"

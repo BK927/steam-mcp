@@ -398,12 +398,12 @@ def _catalog(status: dict[str, Any]) -> dict[str, Any]:
 def _operation_schema(operation: str) -> dict[str, Any]:
     tool, _, mode = operation.partition(".")
     schemas: dict[str, dict[str, Any]] = {
-        "steam_game_get": {"views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"], "technical_select": ["product", "branches", "depots", "current_build"]},
+        "steam_game_get": {"views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"], "technical_select": ["product", "branches", "depots", "current_build"], "achievements": "limit and cursor page items; select definitions and/or global_rates"},
         "steam_player_get": {"views": ["profile", "social", "library", "wishlist", "progress", "inventory"], "player": "one reference, or 1-100 references for profile only; omitted uses STEAM_USER", "multi_profile_select": ["summary"], "progress_requires": "game"},
-        "steam_search": {"modes": ["lookup", "discover", "deals", "chart"], "discover_filters": ["tags", "max_price", "on_sale", "platform", "sort", "player", "exclude_owned", "released_within_days"]},
+        "steam_search": {"modes": ["lookup", "discover", "deals", "chart"], "filters": {"lookup": [], "discover": ["tags", "max_price", "on_sale", "platform", "sort", "player", "exclude_owned", "released_within_days"], "deals": ["max_price", "min_discount"], "chart": ["section"]}},
         "steam_reviews_get": {"modes": ["summary", "page"], "filters": ["review_filter", "day_range", "sort_by", "review_type", "purchase_type", "language", "include_offtopic_activity", "include_author_id"]},
-        "steam_community_get": {"kinds": ["package", "workshop", "market"], "market_options": ["appid", "market_hash_name", "currency", "include_item_details"]},
-        "steam_analyze": {"tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"]},
+        "steam_community_get": {"kinds": ["package", "workshop", "market"], "market_options": ["appid", "market_hash_name", "currency", "include_item_details"], "market_currency": "integer Steam Market code 1-41"},
+        "steam_analyze": {"tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"], "review_insights": "partial, corpus_complete, stop_reason, signed continuation_cursor", "purchase_decision_language": "options.language selects readable feedback; official score remains all-language"},
         "steam_job_get": {"fields": ["job_id", "cursor", "limit", "max_chars"]},
         "steam_job_cancel": {"fields": ["job_id"]},
     }

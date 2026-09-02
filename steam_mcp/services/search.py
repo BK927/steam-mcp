@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ..contracts import ErrorCode, ServiceError
 from .base import BaseService, bounded_limit, locale_values
 
 SEARCH_MODES = frozenset({"lookup", "discover", "deals", "chart"})
+SEARCH_FILTERS = {
+    "lookup": frozenset(),
+    "discover": frozenset(
+        {
+            "tags",
+            "max_price",
+            "on_sale",
+            "platform",
+            "sort",
+            "player",
+            "exclude_owned",
+            "released_within_days",
+        }
+    ),
+    "deals": frozenset({"max_price", "min_discount"}),
+    "chart": frozenset({"section"}),
+}
 
 
 class SearchService(BaseService):
@@ -25,6 +43,13 @@ class SearchService(BaseService):
             raise ServiceError(
                 ErrorCode.INVALID_ARGUMENT,
                 f"Unsupported search mode: {mode}.",
+                schema_uri=f"steam://schema/steam_search.{mode}",
+            )
+        unknown = sorted(set(filters) - SEARCH_FILTERS[mode])
+        if unknown:
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unsupported filters for {mode}: {', '.join(unknown)}.",
                 schema_uri=f"steam://schema/steam_search.{mode}",
             )
         language, country = locale_values(locale)
@@ -58,9 +83,34 @@ class SearchService(BaseService):
             )
             preferred = ("results", "games")
         elif mode == "deals":
-            data = await self.call(
-                "steam_get_featured_specials", {"limit": size, "country_code": country}, ttl=120
+            max_price = self._optional_number(filters, "max_price", minimum=0)
+            min_discount = self._optional_number(
+                filters, "min_discount", minimum=0, maximum=100
             )
+            data = await self.call(
+                "steam_get_featured_specials",
+                {
+                    "limit": 50 if filters else size,
+                    "country_code": country,
+                },
+                ttl=120,
+            )
+            if isinstance(data, dict) and isinstance(data.get("specials"), list):
+                rows = data["specials"]
+                if max_price is not None:
+                    rows = [
+                        row
+                        for row in rows
+                        if self._row_number(row, "final_price") is not None
+                        and self._row_number(row, "final_price") <= max_price
+                    ]
+                if min_discount is not None:
+                    rows = [
+                        row
+                        for row in rows
+                        if (self._row_number(row, "discount_pct") or 0) >= min_discount
+                    ]
+                data = {**data, "specials": rows[:size], "count": len(rows[:size])}
             preferred = ("specials", "games", "items")
         else:
             data = await self.call(
@@ -79,3 +129,35 @@ class SearchService(BaseService):
             provider="steam_store",
             preferred_items=preferred,
         )
+
+    @staticmethod
+    def _optional_number(
+        filters: dict[str, Any],
+        name: str,
+        *,
+        minimum: float,
+        maximum: float | None = None,
+    ) -> float | None:
+        value = filters.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ServiceError(ErrorCode.INVALID_ARGUMENT, f"filters.{name} must be numeric.")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ServiceError(ErrorCode.INVALID_ARGUMENT, f"filters.{name} must be finite.")
+        if number < minimum or (maximum is not None and number > maximum):
+            bound = f" between {minimum:g} and {maximum:g}" if maximum is not None else f" at least {minimum:g}"
+            raise ServiceError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"filters.{name} must be{bound}.",
+            )
+        return number
+
+    @staticmethod
+    def _row_number(row: dict[str, Any], name: str) -> float | None:
+        try:
+            number = float(row.get(name))
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None

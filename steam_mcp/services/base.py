@@ -15,7 +15,13 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from ..cache import TtlLruCache
-from ..contracts import ErrorCode, ServiceError, collection_envelope, entity_envelope
+from ..contracts import (
+    CooperativeCancellation,
+    ErrorCode,
+    ServiceError,
+    collection_envelope,
+    entity_envelope,
+)
 from ..cursor import CursorCodec
 
 
@@ -76,7 +82,7 @@ class FunctionBackend:
             raw = binding.fn(params)
             if inspect.isawaitable(raw):
                 raw = await raw
-        except ServiceError:
+        except (CooperativeCancellation, ServiceError):
             raise
         except Exception as exc:  # noqa: BLE001
             raise ServiceError(
@@ -193,7 +199,10 @@ class BaseService:
         untrusted_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         items, extra = self.find_items(data, preferred_items)
-        if items or next_cursor is not None:
+        has_preferred_list = isinstance(data, dict) and any(
+            isinstance(data.get(key), list) for key in preferred_items
+        )
+        if items or has_preferred_list or next_cursor is not None:
             return collection_envelope(
                 items,
                 next_cursor=next_cursor,

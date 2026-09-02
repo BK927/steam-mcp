@@ -48,6 +48,10 @@ class ServiceError(Exception):
         self.details = details or {}
 
 
+class CooperativeCancellation(Exception):
+    """Internal control flow for a user-requested analysis cancellation."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

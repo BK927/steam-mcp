@@ -18,7 +18,7 @@ from steam_mcp.cloud_jobs import (
     GcsResultStore,
     WorkerEndpoint,
 )
-from steam_mcp.contracts import ErrorCode, ServiceError
+from steam_mcp.contracts import CooperativeCancellation, ErrorCode, ServiceError
 from steam_mcp.cursor import CursorCodec
 from steam_mcp.jobs import MemoryJobStore, MemoryResultStore
 from steam_mcp.services.analysis import AnalysisService
@@ -432,7 +432,17 @@ def test_duplicate_terminal_delivery_is_noop_and_cancel_checks_fanout_boundary()
         )
     )
     assert cancelling.calls == 1
-    assert run(cancelling_store.get(cancel_job.job_id)).status == "cancelled"
+    cancelled = run(cancelling_store.get(cancel_job.job_id))
+    assert cancelled.status == "cancelled"
+    assert cancelled.progress == {"stage": "cancelled"}
+    assert cancelled.error is None
+
+
+def test_cooperative_cancellation_is_not_converted_to_a_provider_error() -> None:
+    import steam_mcp.legacy_backend as legacy
+
+    with pytest.raises(CooperativeCancellation):
+        legacy._handle_error(CooperativeCancellation())
 
 
 @pytest.mark.skipif(
