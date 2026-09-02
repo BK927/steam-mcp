@@ -75,5 +75,11 @@ assert '"--env-vars-file", $environmentFile' in deployment
 assert '"$shortSha-worker-bootstrap-$revisionNonce" "" $workerExists' in deploy
 assert '"$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $mcpExists' in deploy
 assert "STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion" in deployment
+assert "function Get-ActiveRevision" in deploy
+assert "function Restore-Traffic" in deploy
+assert '"$workerEndpoint,$workerCandidateEndpoint"' in deploy
+assert "$workerPrePromoted = $true" in deploy
+assert "Restore-Traffic $WorkerServiceName $previousWorkerRevision" in deploy
+assert "Restore-Traffic $ServiceName $previousMcpRevision" in deploy
 
 print("Steam compact release contract passed.")

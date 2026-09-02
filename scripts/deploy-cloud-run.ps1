@@ -101,6 +101,27 @@ function Get-TaggedRevision {
   return [string]$match[0].revisionName
 }
 
+function Get-ActiveRevision {
+  param([object]$Document)
+  $entries = @()
+  if ($Document.status.PSObject.Properties.Name -contains "traffic") { $entries += @($Document.status.traffic) }
+  if ($Document.status.PSObject.Properties.Name -contains "trafficStatuses") { $entries += @($Document.status.trafficStatuses) }
+  $match = @($entries | Where-Object {
+      $_.PSObject.Properties["percent"] -and [int]$_.percent -gt 0 -and
+      $_.PSObject.Properties["revisionName"] -and $_.revisionName
+    } | Sort-Object { [int]$_.percent } -Descending | Select-Object -First 1)
+  if ($match.Count -eq 0) { return $null }
+  return [string]$match[0].revisionName
+}
+
+function Restore-Traffic {
+  param([string]$Name, [string]$Revision)
+  if ([string]::IsNullOrWhiteSpace($Revision)) { return }
+  Write-Warning "Restoring $Name traffic to $Revision after candidate failure."
+  & gcloud run services update-traffic $Name --project $ProjectId --region $Region --to-revisions "$Revision=100" --quiet
+  if ($LASTEXITCODE -ne 0) { Write-Warning "Automatic traffic rollback failed for $Name." }
+}
+
 function New-GcloudEnvironmentFile {
   param([System.Collections.IDictionary]$Values)
   $path = Join-Path ([IO.Path]::GetTempPath()) ("steam-mcp-env-{0}.json" -f [Guid]::NewGuid().ToString("N"))
@@ -239,6 +260,8 @@ $immutableImage = "$Region-docker.pkg.dev/$ProjectId/$RepositoryName/$ImageName@
 $workerExists = Test-GcloudResource run services describe $WorkerServiceName --project $ProjectId --region $Region
 $mcpExists = Test-GcloudResource run services describe $ServiceName --project $ProjectId --region $Region
 if ((-not $workerExists -or -not $mcpExists) -and -not $Promote) { throw "The first deployment has no prior revisions. Re-run with -Promote after reviewing the bootstrap exception." }
+$previousWorkerRevision = if ($workerExists) { Get-ActiveRevision (Get-ServiceDocument $WorkerServiceName) } else { $null }
+$previousMcpRevision = if ($mcpExists) { Get-ActiveRevision (Get-ServiceDocument $ServiceName) } else { $null }
 
 Write-Host "[2/7] Deploying the private worker candidate..." -ForegroundColor Cyan
 $workerUrl = ""
@@ -248,75 +271,96 @@ if (-not $workerUrl) {
   $workerUrl = [string](Get-ServiceDocument $WorkerServiceName).status.url
 }
 $workerEndpoint = "$workerUrl/internal/jobs/run"
-Deploy-WorkerCandidate "$shortSha-worker-candidate-$revisionNonce" $workerEndpoint $true
+$predictedWorkerCandidateUrl = "https://candidate---$(([Uri]$workerUrl).Host)"
+$workerCandidateEndpoint = "$predictedWorkerCandidateUrl/internal/jobs/run"
+Deploy-WorkerCandidate "$shortSha-worker-candidate-$revisionNonce" "$workerEndpoint,$workerCandidateEndpoint" $true
 $workerDocument = Get-ServiceDocument $WorkerServiceName
 $workerRevision = Get-TaggedRevision $workerDocument "candidate"
-if (-not $workerRevision) { throw "The worker candidate revision could not be resolved." }
+$workerCandidateUrl = Get-TaggedUrl $workerDocument "candidate"
+if (-not $workerRevision -or -not $workerCandidateUrl) { throw "The worker candidate revision could not be resolved." }
+$workerCandidateEndpoint = "$workerCandidateUrl/internal/jobs/run"
 Invoke-Gcloud run services add-iam-policy-binding $WorkerServiceName --project $ProjectId --region $Region --member "serviceAccount:$tasksServiceAccount" --role roles/run.invoker --condition None --quiet
+$mcpWorkerEndpoint = if ($Promote) { $workerEndpoint } else { $workerCandidateEndpoint }
+$workerPrePromoted = $false
 
-Write-Host "[3/7] Discovering the public MCP candidate tag URL..." -ForegroundColor Cyan
-$serviceUrl = ""
-$candidateUrl = ""
-if ($mcpExists) {
-  $serviceDocument = Get-ServiceDocument $ServiceName
-  $serviceUrl = [string]$serviceDocument.status.url
-  $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
-}
-if (-not $candidateUrl) {
-  $bootstrapHosts = if ($serviceUrl) { ([Uri]$serviceUrl).Host } else { "" }
-  Deploy-McpCandidate "$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $mcpExists
-  $serviceDocument = Get-ServiceDocument $ServiceName
-  $serviceUrl = [string]$serviceDocument.status.url
-  $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
-  if (-not $candidateUrl) { throw "Cloud Run did not publish a candidate tag URL." }
-}
-
-Write-Host "[4/7] Deploying the hardened MCP candidate by digest with zero traffic..." -ForegroundColor Cyan
-$serviceHost = ([Uri]$serviceUrl).Host
-$candidateHost = ([Uri]$candidateUrl).Host
-Deploy-McpCandidate "$shortSha-candidate-$revisionNonce" $serviceUrl "$serviceHost,$candidateHost" $workerEndpoint $true
-$serviceDocument = Get-ServiceDocument $ServiceName
-$candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
-$mcpRevision = Get-TaggedRevision $serviceDocument "candidate"
-if (-not $candidateUrl -or -not $mcpRevision) {
-  throw "The hardened MCP candidate URL/revision could not be resolved."
-}
-
-Write-Host "[5/7] Smoking /health, bearer enforcement, and the eight-tool contract..." -ForegroundColor Cyan
-$health = Invoke-RestMethod -Uri "$candidateUrl/health" -Method Get
-if (-not $health.ok) { throw "Candidate health response did not report ok=true." }
-Test-HttpStatus "$candidateUrl/mcp" 401
-$oauthMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-authorization-server" -Method Get
-if ($oauthMetadata.issuer -ne $serviceUrl -or -not $oauthMetadata.client_id_metadata_document_supported) {
-  throw "Candidate OAuth authorization metadata is invalid."
-}
-$resourceMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-protected-resource/mcp" -Method Get
-if ($resourceMetadata.resource -ne "$serviceUrl/mcp") { throw "Candidate OAuth resource metadata is invalid." }
-$accessToken = (@(& gcloud secrets versions access $accessVersion --secret steam-mcp-access-token --project $ProjectId) -join "").Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) { throw "Could not read the pinned bearer secret version." }
-$priorSmokeToken = $env:MCP_SMOKE_ACCESS_TOKEN
 try {
-  $env:MCP_SMOKE_ACCESS_TOKEN = $accessToken
-  & uv run --quiet --no-project --with "mcp==2.1.1" --with "httpx2==2.12.0" `
-    python (Join-Path $PSScriptRoot "smoke-cloud-run.py") `
-    --url "$candidateUrl/mcp" `
-    --app-id $SmokeAppId
-  if ($LASTEXITCODE -ne 0) { throw "Protocol-aware Steam candidate smoke failed." }
-}
-finally {
-  if ($null -eq $priorSmokeToken) { Remove-Item Env:MCP_SMOKE_ACCESS_TOKEN -ErrorAction SilentlyContinue }
-  else { $env:MCP_SMOKE_ACCESS_TOKEN = $priorSmokeToken }
-}
+  Write-Host "[3/7] Discovering the public MCP candidate tag URL..." -ForegroundColor Cyan
+  $serviceUrl = ""
+  $candidateUrl = ""
+  if ($mcpExists) {
+    $serviceDocument = Get-ServiceDocument $ServiceName
+    $serviceUrl = [string]$serviceDocument.status.url
+    $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
+  }
+  if (-not $candidateUrl) {
+    $bootstrapHosts = if ($serviceUrl) { ([Uri]$serviceUrl).Host } else { "" }
+    Deploy-McpCandidate "$shortSha-bootstrap-$revisionNonce" $serviceUrl $bootstrapHosts $workerEndpoint $mcpExists
+    $serviceDocument = Get-ServiceDocument $ServiceName
+    $serviceUrl = [string]$serviceDocument.status.url
+    $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
+    if (-not $candidateUrl) { throw "Cloud Run did not publish a candidate tag URL." }
+  }
 
-Write-Host "[6/7] Candidate smoke passed." -ForegroundColor Green
-if ($Promote) {
-  Invoke-Gcloud run services update-traffic $WorkerServiceName --project $ProjectId --region $Region --remove-tags candidate --quiet
-  Invoke-Gcloud run services update-traffic $WorkerServiceName --project $ProjectId --region $Region --to-revisions "$workerRevision=100" --quiet
-  Invoke-Gcloud run services update-traffic $ServiceName --project $ProjectId --region $Region --remove-tags candidate --quiet
-  Invoke-Gcloud run services update-traffic $ServiceName --project $ProjectId --region $Region --to-revisions "$mcpRevision=100" --quiet
-  Write-Host "Promoted worker first, then MCP, to 100%." -ForegroundColor Green
+  Write-Host "[4/7] Deploying the hardened MCP candidate by digest with zero traffic..." -ForegroundColor Cyan
+  $serviceHost = ([Uri]$serviceUrl).Host
+  $candidateHost = ([Uri]$candidateUrl).Host
+  Deploy-McpCandidate "$shortSha-candidate-$revisionNonce" $serviceUrl "$serviceHost,$candidateHost" $mcpWorkerEndpoint $true
+  $serviceDocument = Get-ServiceDocument $ServiceName
+  $candidateUrl = Get-TaggedUrl $serviceDocument "candidate"
+  $mcpRevision = Get-TaggedRevision $serviceDocument "candidate"
+  if (-not $candidateUrl -or -not $mcpRevision) {
+    throw "The hardened MCP candidate URL/revision could not be resolved."
+  }
+
+  if ($Promote) {
+    Write-Host "Temporarily routing the private worker to its candidate for the paired smoke..." -ForegroundColor Cyan
+    Invoke-Gcloud run services update-traffic $WorkerServiceName --project $ProjectId --region $Region --to-revisions "$workerRevision=100" --quiet
+    $workerPrePromoted = $true
+  }
+
+  Write-Host "[5/7] Smoking /health, bearer enforcement, and the eight-tool contract..." -ForegroundColor Cyan
+  $health = Invoke-RestMethod -Uri "$candidateUrl/health" -Method Get
+  if (-not $health.ok) { throw "Candidate health response did not report ok=true." }
+  Test-HttpStatus "$candidateUrl/mcp" 401
+  $oauthMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-authorization-server" -Method Get
+  if ($oauthMetadata.issuer -ne $serviceUrl -or -not $oauthMetadata.client_id_metadata_document_supported) {
+    throw "Candidate OAuth authorization metadata is invalid."
+  }
+  $resourceMetadata = Invoke-RestMethod -Uri "$candidateUrl/.well-known/oauth-protected-resource/mcp" -Method Get
+  if ($resourceMetadata.resource -ne "$serviceUrl/mcp") { throw "Candidate OAuth resource metadata is invalid." }
+  $accessToken = (@(& gcloud secrets versions access $accessVersion --secret steam-mcp-access-token --project $ProjectId) -join "").Trim()
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) { throw "Could not read the pinned bearer secret version." }
+  $priorSmokeToken = $env:MCP_SMOKE_ACCESS_TOKEN
+  try {
+    $env:MCP_SMOKE_ACCESS_TOKEN = $accessToken
+    & uv run --quiet --no-project --with "mcp==2.1.1" --with "httpx2==2.12.0" `
+      python (Join-Path $PSScriptRoot "smoke-cloud-run.py") `
+      --url "$candidateUrl/mcp" `
+      --app-id $SmokeAppId
+    if ($LASTEXITCODE -ne 0) { throw "Protocol-aware Steam candidate smoke failed." }
+  }
+  finally {
+    if ($null -eq $priorSmokeToken) { Remove-Item Env:MCP_SMOKE_ACCESS_TOKEN -ErrorAction SilentlyContinue }
+    else { $env:MCP_SMOKE_ACCESS_TOKEN = $priorSmokeToken }
+  }
+
+  Write-Host "[6/7] Candidate smoke passed." -ForegroundColor Green
+  if ($Promote) {
+    Invoke-Gcloud run services update-traffic $WorkerServiceName --project $ProjectId --region $Region --remove-tags candidate --quiet
+    Invoke-Gcloud run services update-traffic $WorkerServiceName --project $ProjectId --region $Region --to-revisions "$workerRevision=100" --quiet
+    Invoke-Gcloud run services update-traffic $ServiceName --project $ProjectId --region $Region --remove-tags candidate --quiet
+    Invoke-Gcloud run services update-traffic $ServiceName --project $ProjectId --region $Region --to-revisions "$mcpRevision=100" --quiet
+    Write-Host "Promoted worker first, then MCP, to 100%." -ForegroundColor Green
+  }
+  else { Write-Host "Both candidates remain at 0%; promote them only after approval." -ForegroundColor Yellow }
 }
-else { Write-Host "Both candidates remain at 0%; promote them only after approval." -ForegroundColor Yellow }
+catch {
+  if ($Promote -and $workerPrePromoted) {
+    Restore-Traffic $WorkerServiceName $previousWorkerRevision
+    Restore-Traffic $ServiceName $previousMcpRevision
+  }
+  throw
+}
 
 if ($Promote) {
   Write-Host "[7/7] Saving the promoted bearer credential for this Windows account..." -ForegroundColor Cyan
