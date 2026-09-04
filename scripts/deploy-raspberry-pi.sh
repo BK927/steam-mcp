@@ -6,7 +6,7 @@ APP_COMMIT="${STEAM_MCP_COMMIT:?Set STEAM_MCP_COMMIT to the exact source commit}
 SOURCE_REPOSITORY="${STEAM_MCP_SOURCE_REPOSITORY:-BK927/steam-mcp}"
 PUBLIC_BASE_URL="${STEAM_MCP_PUBLIC_BASE_URL:?Set STEAM_MCP_PUBLIC_BASE_URL to the public HTTPS origin}"
 LOCAL_PORT="${STEAM_MCP_LOCAL_PORT:-8082}"
-PUBLIC_PORT="${STEAM_MCP_PUBLIC_PORT:-10000}"
+PUBLIC_PORT="${STEAM_MCP_PUBLIC_PORT:-8443}"
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
   echo "This deployment expects aarch64." >&2

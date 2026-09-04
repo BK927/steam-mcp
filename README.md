@@ -109,11 +109,11 @@ The source includes a standalone ARM64 deployment that preserves existing secret
 
 ```bash
 STEAM_MCP_COMMIT="$(git rev-parse HEAD)" \
-STEAM_MCP_PUBLIC_BASE_URL="https://YOUR-PI.YOUR-TAILNET.ts.net:10000" \
+STEAM_MCP_PUBLIC_BASE_URL="https://YOUR-PI.YOUR-TAILNET.ts.net:8443" \
 bash scripts/deploy-raspberry-pi.sh
 ```
 
-Defaults are local loopback port `8082` and public Funnel port `10000`; override them with `STEAM_MCP_LOCAL_PORT` and `STEAM_MCP_PUBLIC_PORT`. The deployed `/mcp` requires the generated bearer or the personal OAuth flow. Credentials live only in the mode-0600 environment file on the Pi and are preserved on later code deployments.
+Defaults are local loopback port `8082` and public Funnel port `8443`; override them with `STEAM_MCP_LOCAL_PORT` and `STEAM_MCP_PUBLIC_PORT`. Port `8443` keeps Steam separate from the YouTube service on `443` while remaining compatible with ChatGPT's server-side OAuth discovery. The deployed `/mcp` requires the generated bearer or the personal OAuth flow. Credentials live only in the mode-0600 environment file on the Pi and are preserved on later code deployments.
 
 ## Configuration
 
