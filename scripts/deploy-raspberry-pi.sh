@@ -55,7 +55,7 @@ rollback() {
   fi
   if [[ "$status" -ne 0 && "$FUNNEL_CONFIGURED" == "true" ]]; then
     echo "Restoring the previous Tailscale Serve/Funnel configuration." >&2
-    tailscale serve set-config "$work_dir/tailscale-before.json" || true
+    tailscale serve set-config --all "$work_dir/tailscale-before.json" || true
   fi
   cleanup
   exit "$status"
@@ -187,7 +187,7 @@ curl --fail --silent --show-error \
   --header "Host: $PUBLIC_HOST" \
   "http://127.0.0.1:$LOCAL_PORT/.well-known/oauth-authorization-server" >/dev/null
 
-tailscale serve get-config "$work_dir/tailscale-before.json"
+tailscale serve get-config --all "$work_dir/tailscale-before.json"
 tailscale funnel --bg --https="$PUBLIC_PORT" --yes "http://127.0.0.1:$LOCAL_PORT" >/dev/null
 FUNNEL_CONFIGURED=true
 
