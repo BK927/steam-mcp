@@ -81,6 +81,8 @@ try {
   New-Item -ItemType Directory -Path (Join-Path $Staging ".codex-plugin") -Force | Out-Null
   Copy-Item -LiteralPath (Join-Path $ProjectRoot ".codex-plugin\plugin.json") `
     -Destination (Join-Path $Staging ".codex-plugin\plugin.json")
+  Copy-Item -LiteralPath (Join-Path $ProjectRoot "icon.png") `
+    -Destination (Join-Path $Staging "icon.png")
 
   if ($Profile -eq "cloud") {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot ".mcp.json") `
@@ -100,7 +102,7 @@ try {
       -LiteralPath (Join-Path $Staging ".mcp.json") -Encoding utf8
   }
 
-  $expectedFiles = @(".codex-plugin/plugin.json", ".mcp.json") | Sort-Object
+  $expectedFiles = @(".codex-plugin/plugin.json", ".mcp.json", "icon.png") | Sort-Object
   $actualFiles = @(
     Get-ChildItem -LiteralPath $Staging -Recurse -File | ForEach-Object {
       [IO.Path]::GetRelativePath($Staging, $_.FullName).Replace("\", "/")
