@@ -103,6 +103,18 @@ Cloud plugin configuration lives in `.mcp.json`; local and cloud profiles are bo
 
 Hosts that implement OpenAI [Tool Search](https://developers.openai.com/api/docs/guides/tools-tool-search) can defer this server's definitions until Steam work is actually selected. Enable `tool_search` and mark the MCP tool as `defer_loading` in the host/API tool configuration; do not add `defer_loading` to this plugin's `.mcp.json`, which follows the [Codex plugin packaging contract](https://developers.openai.com/plugins/build/plugins).
 
+## Raspberry Pi
+
+The source includes a standalone ARM64 deployment that preserves existing secrets and the previous release, installs a user-level systemd service, verifies the local security boundary, adds one Tailscale Funnel HTTPS port, and runs a public MCP smoke. It does not modify other Funnel routes or MCP services.
+
+```bash
+STEAM_MCP_COMMIT="$(git rev-parse HEAD)" \
+STEAM_MCP_PUBLIC_BASE_URL="https://YOUR-PI.YOUR-TAILNET.ts.net:10000" \
+bash scripts/deploy-raspberry-pi.sh
+```
+
+Defaults are local loopback port `8082` and public Funnel port `10000`; override them with `STEAM_MCP_LOCAL_PORT` and `STEAM_MCP_PUBLIC_PORT`. The deployed `/mcp` requires the generated bearer or the personal OAuth flow. Credentials live only in the mode-0600 environment file on the Pi and are preserved on later code deployments.
+
 ## Configuration
 
 | Variable | Default | Meaning |
