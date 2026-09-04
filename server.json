@@ -7,13 +7,13 @@
     "url": "https://github.com/Sarg338/steam-mcp",
     "source": "github"
   },
-  "version": "2.1.1",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "steam-mcp",
-      "version": "2.1.1",
+      "version": "2.2.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -27,6 +27,12 @@
         {
           "name": "STEAM_USER",
           "description": "Optional. Your own Steam vanity name, SteamID64, or profile URL, so the account tools default to you when you omit a steamid. Public profile name, not a secret.",
+          "isRequired": false
+        },
+        {
+          "name": "GAMALYTIC_API_KEY",
+          "description": "Optional Gamalytic API key. Without it, the analytics view uses Gamalytic's keyless public field subset.",
+          "isSecret": true,
           "isRequired": false
         }
       ]

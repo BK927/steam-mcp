@@ -451,6 +451,15 @@ def assert_backend_calls(
         ("live", {}, [("steam_get_current_players", {"appid": 10})]),
         ("news", {}, [("steam_get_app_news", {"appid": 10})]),
         ("pricing", {}, [("steam_get_app_regional_pricing", {"appid": 10})]),
+        (
+            "analytics",
+            {"options": {"providers": ["steam"]}},
+            [
+                ("steam_get_app_details", {"appid": 10}),
+                ("steam_get_current_players", {"appid": 10}),
+                ("steam_get_app_reviews", {"appid": 10}),
+            ],
+        ),
     ],
 )
 def test_all_game_views_route_to_legacy_operations(
@@ -462,6 +471,53 @@ def test_all_game_views_route_to_legacy_operations(
     result = call(make_server(backend), "steam_game_get", {"game": 10, "view": view, **extra})
     assert result["isError"] is False
     assert_backend_calls(backend, expected)
+
+
+def test_analytics_provider_selection_validation_and_partial_failure() -> None:
+    class PartialBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            if operation == "steam_get_steamspy_analytics":
+                self.calls.append((operation, arguments))
+                raise ServiceError(
+                    ErrorCode.RATE_LIMITED,
+                    "SteamSpy rate-limited this request.",
+                    retryable=True,
+                )
+            return await super().call(operation, arguments)
+
+    backend = PartialBackend()
+    result = call(
+        make_server(backend),
+        "steam_game_get",
+        {
+            "game": 10,
+            "view": "analytics",
+            "options": {"providers": ["gamalytic", "steamspy"]},
+        },
+    )["structuredContent"]
+    assert result["data"]["availability"]["gamalytic"]["status"] == "available"
+    assert result["data"]["availability"]["steamspy"] == {
+        "status": "unavailable",
+        "code": ErrorCode.RATE_LIMITED.value,
+        "retryable": True,
+    }
+    assert set(result["data"]["sources"]) == {"gamalytic"}
+    assert result["meta"]["provider"] == "gamalytic"
+    assert "data.sources.gamalytic.tags[]" in result["meta"]["untrusted_fields"]
+    assert any("SteamSpy" in warning or "steamspy" in warning for warning in result["meta"]["warnings"])
+
+    invalid = call(
+        make_server(),
+        "steam_game_get",
+        {
+            "game": 10,
+            "view": "analytics",
+            "options": {"providers": ["steam", "unknown"]},
+        },
+    )["structuredContent"]
+    assert invalid["code"] == ErrorCode.INVALID_ARGUMENT.value
+    assert invalid["schema_uri"] == "steam://schema/steam_game_get.analytics"
+    assert invalid["details"]["allowed"] == ["gamalytic", "steam", "steamspy"]
 
 
 @pytest.mark.parametrize(

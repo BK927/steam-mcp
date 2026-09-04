@@ -104,7 +104,7 @@ def create_server(
     """Build the one registry used by both stdio and Streamable HTTP."""
     server = MCPServer(
         "steam_mcp",
-        version="2.1.1",
+        version="2.2.0",
         auth_server_provider=oauth.provider if oauth else None,
         auth=oauth.settings if oauth else None,
         instructions=(
@@ -172,7 +172,7 @@ def create_server(
             )
 
     @server.tool(
-        description="Read Steam game store, build, DLC, tags, achievements, live, news or pricing data.",
+        description="Read Steam game, pricing, live, technical or multi-provider analytics data.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
@@ -180,7 +180,7 @@ def create_server(
     async def steam_game_get(
         game: str | int,
         view: Literal[
-            "summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"
+            "summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing", "analytics"
         ] = "summary",
         select: list[str] | None = None,
         options: dict[str, Any] | None = None,
@@ -415,9 +415,9 @@ def _compact_tool_schemas(server: MCPServer) -> None:
 def _catalog(status: dict[str, Any]) -> dict[str, Any]:
     value = {
         "schema_version": "1",
-        "server_version": "2.1.1",
+        "server_version": "2.2.0",
         "tools": list(PUBLIC_TOOL_NAMES),
-        "game_views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"],
+        "game_views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing", "analytics"],
         "player_views": ["profile", "social", "library", "wishlist", "progress", "inventory"],
         "search_modes": ["lookup", "discover", "deals", "chart"],
         "review_modes": ["summary", "page"],
@@ -428,7 +428,12 @@ def _catalog(status: dict[str, Any]) -> dict[str, Any]:
             "community_market": {
                 "status": status.get("community_market", "experimental"),
                 "note": "Steam may rate-limit server or shared cloud IPs.",
-            }
+            },
+            "market_analytics": {
+                "providers": ["steam", "gamalytic", "steamspy"],
+                "gamalytic_access": "configured_plan" if status.get("gamalytic_api_key_configured") else "keyless_public_fields",
+                "note": "Official facts and third-party estimates remain separate; providers are best-effort.",
+            },
         },
         "status": status,
     }
@@ -440,7 +445,7 @@ def _catalog(status: dict[str, Any]) -> dict[str, Any]:
 def _operation_schema(operation: str) -> dict[str, Any]:
     tool, _, mode = operation.partition(".")
     schemas: dict[str, dict[str, Any]] = {
-        "steam_game_get": {"views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"], "summary_store_select": ["appid", "name", "type", "is_free", "price", "initial_price", "discount_pct", "developers", "publishers", "release_date", "coming_soon", "genres", "categories", "features", "controller_support", "steam_deck", "platforms", "metacritic", "metacritic_url", "recommendations_total", "achievements_total", "dlc", "dlc_count", "required_age", "mature_content", "supported_languages", "full_audio_languages", "website", "short_description", "pc_requirements", "about_the_game"], "options": {"summary/store": ["include_requirements", "include_long_description"], "technical": ["section", "branch", "platform", "include_launch_options", "include_all_manifests"], "dlc": ["enrich", "on_sale_only"], "pricing": ["countries"]}, "technical_select": ["product", "branches", "depots", "current_build"], "achievements": "limit and cursor page items; select definitions and/or global_rates"},
+        "steam_game_get": {"views": ["summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing", "analytics"], "summary_store_select": ["appid", "name", "type", "is_free", "price", "initial_price", "discount_pct", "developers", "publishers", "release_date", "coming_soon", "genres", "categories", "features", "controller_support", "steam_deck", "platforms", "metacritic", "metacritic_url", "recommendations_total", "achievements_total", "dlc", "dlc_count", "required_age", "mature_content", "supported_languages", "full_audio_languages", "website", "short_description", "pc_requirements", "about_the_game"], "options": {"summary/store": ["include_requirements", "include_long_description"], "technical": ["section", "branch", "platform", "include_launch_options", "include_all_manifests"], "dlc": ["enrich", "on_sale_only"], "pricing": ["countries"], "analytics": {"providers": ["steam", "gamalytic", "steamspy"]}}, "technical_select": ["product", "branches", "depots", "current_build"], "achievements": "limit and cursor page items; select definitions and/or global_rates", "analytics": "official facts and separately identified third-party estimates; unavailable providers do not discard successful sources"},
         "steam_player_get": {"views": ["profile", "social", "library", "wishlist", "progress", "inventory"], "player": "one reference, or 1-100 references for profile only; omitted uses STEAM_USER", "select": {"profile": ["summary", "steam_id", "level", "bans", "badges"], "social": ["friends", "groups"], "progress": ["achievements", "stats", "rarest_unlocks"]}, "options": {"social": ["online_only", "enrich"], "library": ["scope", "sort_by", "include_free_games"], "wishlist": ["enrich", "on_sale_only"], "inventory": ["appid", "context_id"]}, "multi_profile_select": ["summary"], "progress_requires": "game"},
         "steam_search": {"modes": ["lookup", "discover", "deals", "chart"], "filters": {"lookup": [], "discover": ["tags", "max_price", "on_sale", "platform", "sort", "player", "exclude_owned", "released_within_days"], "deals": ["max_price", "min_discount"], "chart": ["section"]}, "pagination": {"discover": "signed cursor", "lookup/deals/chart": "bounded top_n_snapshot"}},
         "steam_reviews_get": {"modes": ["summary", "page"], "filters": {"summary": ["review_filter", "day_range", "recent_max_reviews", "review_type", "purchase_type"], "page": ["sort_by", "review_type", "purchase_type", "include_offtopic_activity", "include_author_id"]}},

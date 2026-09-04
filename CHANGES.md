@@ -4,6 +4,11 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [2.2.0] — Multi-provider market analytics
+- Added `steam_game_get(view="analytics")` without expanding the eight-tool surface, keeping official Steam facts separate from Gamalytic and SteamSpy estimates.
+- Added keyless Gamalytic public fields, optional premium-key support, best-effort SteamSpy data, per-provider availability, provenance, and estimate warnings.
+- Added least-privilege Cloud Run secret wiring for an optional Gamalytic API key.
+
 ## [2.1.1] — ChatGPT OAuth redirect hotfix
 - Allowed the exact ChatGPT callback origin in the login page form policy so Chrome can follow the successful authorization redirect.
 

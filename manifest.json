@@ -2,10 +2,10 @@
   "manifest_version": "0.4",
   "name": "steam-mcp",
   "display_name": "Steam (read-only)",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "icon": "icon.png",
   "description": "Read-only Steam research through 8 compact game, player, review, community, search, and job tools.",
-  "long_description": "A read-only Model Context Protocol server for Valve's public Steam APIs plus a disclosed, keyless community mirror of current public SteamCMD AppInfo. Eight compact tools cover store data, reviews, prices, tags, live players, current builds, public player data, libraries, achievements, community data, and bounded analysis jobs. The server never scrapes SteamDB and never writes, trades, posts, launches games, or makes purchases.\n\nA free Steam Web API key is optional and is only needed for account-specific views and personalization. Friends lists, owned games, and achievements are visible only when the target Steam profile's relevant privacy setting is Public.",
+  "long_description": "A read-only Model Context Protocol server for Valve's public Steam APIs plus disclosed third-party sources for current SteamCMD AppInfo and market estimates. Eight compact tools cover store data, reviews, prices, tags, live players, current builds, public player data, libraries, achievements, community data, market analytics, and bounded analysis jobs. Official Steam facts remain separate from Gamalytic and SteamSpy estimates. The server never scrapes SteamDB and never writes, trades, posts, launches games, or makes purchases.\n\nA free Steam Web API key is optional and is only needed for account-specific views and personalization. A Gamalytic key is optional; keyless public fields remain available. Friends lists, owned games, and achievements are visible only when the target Steam profile's relevant privacy setting is Public.",
   "author": {
     "name": "Sarg",
     "url": "https://github.com/Sarg338/steam-mcp"
@@ -44,6 +44,7 @@
       ],
       "env": {
         "STEAM_API_KEY": "${user_config.steam_api_key}",
+        "GAMALYTIC_API_KEY": "${user_config.gamalytic_api_key}",
         "STEAM_USER": "${user_config.steam_user}"
       }
     }
@@ -51,7 +52,7 @@
   "tools": [
     {
       "name": "steam_game_get",
-      "description": "Get a Steam game's store, technical, DLC, tag, achievement, live, news, or pricing view"
+      "description": "Get a Steam game's store, technical, live, pricing, or multi-provider analytics view"
     },
     {
       "name": "steam_player_get",
@@ -108,6 +109,14 @@
       "title": "Your Steam name (optional)",
       "description": "Your public Steam vanity name, SteamID64, or profile URL. Single-player requests may default to it.",
       "sensitive": false,
+      "required": false,
+      "default": ""
+    },
+    "gamalytic_api_key": {
+      "type": "string",
+      "title": "Gamalytic API Key (optional)",
+      "description": "Optional. Enables fields included in your Gamalytic plan; the analytics view otherwise uses the keyless public field subset.",
+      "sensitive": true,
       "required": false,
       "default": ""
     }

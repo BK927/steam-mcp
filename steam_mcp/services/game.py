@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -9,8 +10,10 @@ from ..contracts import ErrorCode, ServiceError
 from .base import BaseService, bounded_limit, locale_values
 
 GAME_VIEWS = frozenset(
-    {"summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing"}
+    {"summary", "store", "compatibility", "technical", "dlc", "tags", "achievements", "live", "news", "pricing", "analytics"}
 )
+
+ANALYTICS_PROVIDERS = frozenset({"steam", "gamalytic", "steamspy"})
 
 STORE_SELECT_FIELDS = frozenset(
     {
@@ -38,6 +41,7 @@ GAME_OPTIONS = {
     "live": frozenset(),
     "news": frozenset(),
     "pricing": frozenset({"countries"}),
+    "analytics": frozenset({"providers"}),
 }
 
 
@@ -128,6 +132,21 @@ class GameService(BaseService):
                     ErrorCode.INVALID_ARGUMENT,
                     "options.countries must contain 1 to 100 two-letter country codes.",
                     schema_uri=schema_uri,
+                )
+        if "providers" in options:
+            providers = options["providers"]
+            if (
+                not isinstance(providers, list)
+                or not 1 <= len(providers) <= len(ANALYTICS_PROVIDERS)
+                or any(not isinstance(provider, str) for provider in providers)
+                or len(set(providers)) != len(providers)
+                or set(providers) - ANALYTICS_PROVIDERS
+            ):
+                raise ServiceError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "options.providers must be a unique non-empty list of supported providers.",
+                    schema_uri=schema_uri,
+                    details={"allowed": sorted(ANALYTICS_PROVIDERS)},
                 )
         if select and view not in {"summary", "store", "technical", "achievements"}:
             raise ServiceError(
@@ -309,13 +328,36 @@ class GameService(BaseService):
             data = await self.call("steam_get_app_news", {"appid": appid, "count": size}, ttl=300)
             preferred = ("news", "items")
             untrusted_fields = ["items[].title", "items[].excerpt", "items[].url"]
-        else:
+        elif view == "pricing":
             data = await self.call(
                 "steam_get_app_regional_pricing",
                 {"appid": appid, "countries": options.get("countries") or [country]},
                 ttl=300,
             )
             preferred = ("prices", "regions")
+        else:
+            requested = options.get("providers") or ["steam", "gamalytic", "steamspy"]
+            data, warnings = await self._analytics(appid, requested, country, language)
+            untrusted_fields = []
+            if "gamalytic" in data["sources"]:
+                untrusted_fields.extend(
+                    [
+                        "data.sources.gamalytic.name",
+                        "data.sources.gamalytic.genres[]",
+                        "data.sources.gamalytic.tags[]",
+                    ]
+                )
+            if "steamspy" in data["sources"]:
+                untrusted_fields.extend(
+                    [
+                        "data.sources.steamspy.name",
+                        "data.sources.steamspy.developer",
+                        "data.sources.steamspy.publisher",
+                        "data.sources.steamspy.languages",
+                        "data.sources.steamspy.genre",
+                        "data.sources.steamspy.top_tags",
+                    ]
+                )
 
         next_value = self.next_cursor(
             scope=f"game:{view}",
@@ -325,8 +367,151 @@ class GameService(BaseService):
         return self.result_envelope(
             data,
             canonical_uri=f"steam://entity/app/{appid}",
-            provider="steamcmd" if view == "technical" else "steam_store",
+            provider=(
+                "+".join(data.get("sources", {}))
+                if view == "analytics" and isinstance(data, dict)
+                else "steamcmd" if view == "technical" else "steam_store"
+            ),
             preferred_items=preferred,
             next_cursor=next_value,
+            warnings=warnings if view == "analytics" else None,
             untrusted_fields=untrusted_fields,
         )
+
+    async def _analytics(
+        self,
+        appid: int,
+        requested: list[str],
+        country: str,
+        language: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        async def official() -> dict[str, Any]:
+            calls = [
+                self.call(
+                    "steam_get_app_details",
+                    {
+                        "appid": appid,
+                        "country_code": country,
+                        "language": language,
+                        "include_requirements": False,
+                        "include_long_description": False,
+                    },
+                    ttl=600,
+                ),
+                self.call("steam_get_current_players", {"appid": appid}, ttl=60),
+                self.call(
+                    "steam_get_app_reviews",
+                    {
+                        "appid": appid,
+                        "review_filter": "all",
+                        "day_range": 30,
+                        "recent_max_reviews": 0,
+                        "review_type": "all",
+                        "purchase_type": "steam",
+                        "limit": 0,
+                        "country_code": country,
+                        "language": "all",
+                    },
+                    ttl=300,
+                ),
+            ]
+            rows = await asyncio.gather(*calls, return_exceptions=True)
+            names = ("store", "live", "reviews")
+            available = {
+                name: row for name, row in zip(names, rows, strict=True)
+                if not isinstance(row, Exception)
+            }
+            if not available:
+                first = rows[0]
+                if isinstance(first, ServiceError):
+                    raise first
+                raise ServiceError(
+                    ErrorCode.PROVIDER_UNAVAILABLE,
+                    "Official Steam analytics are unavailable.",
+                    retryable=True,
+                )
+            unavailable = [
+                name for name, row in zip(names, rows, strict=True)
+                if isinstance(row, Exception)
+            ]
+            return {
+                **available,
+                "unavailable_components": unavailable,
+                "provenance": {
+                    "provider": "steam",
+                    "kind": "official_first_party",
+                    "documentation": "https://partner.steamgames.com/doc/webapi",
+                },
+            }
+
+        async def load(provider: str) -> dict[str, Any]:
+            if provider == "steam":
+                return await official()
+            operation = {
+                "gamalytic": "steam_get_gamalytic_analytics",
+                "steamspy": "steam_get_steamspy_analytics",
+            }[provider]
+            return await self.call(operation, {"appid": appid}, ttl=86_400)
+
+        rows = await asyncio.gather(
+            *(load(provider) for provider in requested),
+            return_exceptions=True,
+        )
+        sources: dict[str, Any] = {}
+        availability: dict[str, Any] = {}
+        warnings: list[str] = []
+        for provider, row in zip(requested, rows, strict=True):
+            if isinstance(row, Exception):
+                code = row.code.value if isinstance(row, ServiceError) else ErrorCode.PROVIDER_UNAVAILABLE.value
+                retryable = row.retryable if isinstance(row, ServiceError) else True
+                availability[provider] = {
+                    "status": "unavailable",
+                    "code": code,
+                    "retryable": retryable,
+                }
+                warnings.append(f"{provider} was unavailable ({code}); other sources were retained.")
+                continue
+            sources[provider] = row
+            availability[provider] = {"status": "available"}
+
+        if not sources:
+            raise ServiceError(
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                "None of the requested analytics providers were available.",
+                retryable=any(value.get("retryable") for value in availability.values()),
+                schema_uri="steam://schema/steam_game_get.analytics",
+                details={"providers": availability},
+            )
+        if "gamalytic" in sources:
+            warnings.append("Gamalytic sales, player, owner and revenue values are third-party estimates.")
+            if sources["gamalytic"].get("provenance", {}).get("access_mode") == "free":
+                warnings.append("Gamalytic is using its keyless public field subset.")
+        if "steamspy" in sources:
+            warnings.append(
+                "SteamSpy values are sample-based estimates; owners are not sales and recent releases may be unreliable."
+            )
+
+        comparison: dict[str, Any] = {}
+        steam = sources.get("steam", {})
+        if isinstance(steam.get("live"), dict):
+            comparison["official_current_players"] = steam["live"].get("current_players")
+        summary = steam.get("reviews", {}).get("official_store_summary") if isinstance(steam.get("reviews"), dict) else None
+        if isinstance(summary, dict):
+            comparison["official_review_positive_pct"] = summary.get("positive_pct")
+            comparison["official_review_total_positive"] = summary.get("total_positive")
+            comparison["official_review_total_negative"] = summary.get("total_negative")
+        gamalytic = sources.get("gamalytic", {})
+        for key in ("estimated_copies_sold", "estimated_players", "estimated_owners", "estimated_revenue"):
+            if key in gamalytic:
+                comparison[f"gamalytic_{key}"] = gamalytic[key]
+        steamspy = sources.get("steamspy", {})
+        for key in ("estimated_owners_low", "estimated_owners_high", "estimated_ccu"):
+            if key in steamspy:
+                comparison[f"steamspy_{key}"] = steamspy[key]
+
+        return {
+            "appid": appid,
+            "sources": sources,
+            "availability": availability,
+            "comparison": comparison,
+        }, warnings

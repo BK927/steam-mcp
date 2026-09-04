@@ -16,6 +16,11 @@ from .cloud_jobs import CloudTasksJobRunner, FirestoreJobStore, GcsResultStore
 from .cursor import CursorCodec
 from .jobs import InlineJobRunner, MemoryJobStore, MemoryResultStore
 from .oauth import OAuthRuntime, create_oauth_runtime
+from .providers.market_analytics import (
+    AnalyticsProviderInput,
+    get_gamalytic_analytics,
+    get_steamspy_analytics,
+)
 from .public_server import ServerDependencies, create_server
 from .services.base import FunctionBackend, OperationBinding
 
@@ -31,6 +36,16 @@ def _public_dependencies() -> ServerDependencies:
         parameter = signature.parameters.get("params")
         if parameter is not None and isinstance(parameter.annotation, type):
             operations[tool.name] = OperationBinding(tool.fn, parameter.annotation)
+    operations.update(
+        {
+            "steam_get_gamalytic_analytics": OperationBinding(
+                get_gamalytic_analytics, AnalyticsProviderInput
+            ),
+            "steam_get_steamspy_analytics": OperationBinding(
+                get_steamspy_analytics, AnalyticsProviderInput
+            ),
+        }
+    )
 
     backend = FunctionBackend(operations)
     cache = TtlLruCache(max_entries=512, ttl_seconds=600)
@@ -85,6 +100,9 @@ def _public_dependencies() -> ServerDependencies:
         job_runner=runner,
         status={
             "api_key_configured": legacy_backend._have_api_key(),
+            "gamalytic_api_key_configured": bool(
+                os.getenv("GAMALYTIC_API_KEY", "").strip()
+            ),
             "default_user_configured": bool(legacy_backend._get_default_user()),
             "job_backend": job_backend,
             "process_role": os.getenv("STEAM_PROCESS_ROLE", "mcp").strip().lower(),

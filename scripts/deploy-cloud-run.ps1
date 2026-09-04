@@ -196,6 +196,7 @@ function Deploy-McpCandidate {
   })
   $secretValues = "MCP_ACCESS_TOKEN=steam-mcp-access-token:$accessVersion,MCP_OAUTH_LOGIN_SECRET=steam-mcp-oauth-login-secret:$oauthLoginVersion,MCP_OAUTH_SIGNING_SECRET=steam-mcp-oauth-signing-secret:$oauthSigningVersion,STEAM_JOB_WORKER_TOKEN=steam-mcp-worker-token:$workerTokenVersion,STEAM_CURSOR_SECRET=steam-mcp-cursor-secret:$cursorSecretVersion"
   if ($steamApiVersion) { $secretValues += ",STEAM_API_KEY=steam-web-api-key:$steamApiVersion" }
+  if ($gamalyticApiVersion) { $secretValues += ",GAMALYTIC_API_KEY=steam-gamalytic-api-key:$gamalyticApiVersion" }
   $arguments = @(
     "run", "deploy", $ServiceName, "--project", $ProjectId, "--region", $Region,
     "--image", $immutableImage, "--allow-unauthenticated", "--ingress", "all",
@@ -249,6 +250,7 @@ $cursorSecretVersion = Get-LatestSecretVersion "steam-mcp-cursor-secret"
 $oauthLoginVersion = Get-LatestSecretVersion "steam-mcp-oauth-login-secret"
 $oauthSigningVersion = Get-LatestSecretVersion "steam-mcp-oauth-signing-secret"
 $steamApiVersion = Get-LatestSecretVersion "steam-web-api-key" $false
+$gamalyticApiVersion = Get-LatestSecretVersion "steam-gamalytic-api-key" $false
 
 Write-Host "[1/7] Building immutable image $taggedImage..." -ForegroundColor Cyan
 Push-Location $projectRoot
@@ -384,3 +386,4 @@ Write-Host "Cursor sec:  steam-mcp-cursor-secret:$cursorSecretVersion"
 Write-Host "OAuth login: steam-mcp-oauth-login-secret:$oauthLoginVersion"
 Write-Host "OAuth sign:  steam-mcp-oauth-signing-secret:$oauthSigningVersion"
 if ($steamApiVersion) { Write-Host "Steam API:   steam-web-api-key:$steamApiVersion" }
+if ($gamalyticApiVersion) { Write-Host "Gamalytic:  steam-gamalytic-api-key:$gamalyticApiVersion" }

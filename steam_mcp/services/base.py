@@ -196,6 +196,7 @@ class BaseService:
         provider: str,
         preferred_items: tuple[str, ...] = (),
         next_cursor: str | None = None,
+        warnings: list[str] | None = None,
         untrusted_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         items, extra = self.find_items(data, preferred_items)
@@ -208,6 +209,7 @@ class BaseService:
                 next_cursor=next_cursor,
                 canonical_uri=canonical_uri,
                 provider=provider,
+                warnings=warnings,
                 untrusted_fields=untrusted_fields,
                 extra=extra,
             )
@@ -215,6 +217,7 @@ class BaseService:
             data,
             canonical_uri=canonical_uri,
             provider=provider,
+            warnings=warnings,
             untrusted_fields=untrusted_fields,
         )
 

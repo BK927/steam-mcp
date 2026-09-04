@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "2.1.1"
+EXPECTED_VERSION = "2.2.0"
 EXPECTED_TOOLS = {
     "steam_game_get",
     "steam_player_get",

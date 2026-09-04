@@ -12,7 +12,8 @@ param(
   [string]$BucketName = "",
   [string]$JobCollection = "steam_jobs",
   [string]$OAuthCodeCollection = "steam_oauth_codes",
-  [switch]$ConfigureSteamApiKey
+  [switch]$ConfigureSteamApiKey,
+  [switch]$ConfigureGamalyticApiKey
 )
 
 Set-StrictMode -Version Latest
@@ -184,12 +185,23 @@ Ensure-InitialSecretValue "steam-mcp-cursor-secret" { New-RandomHex 32 }
 Ensure-InitialSecretValue "steam-mcp-oauth-login-secret" { New-RandomHex 32 }
 Ensure-InitialSecretValue "steam-mcp-oauth-signing-secret" { New-RandomHex 32 }
 Ensure-Secret "steam-web-api-key"
+Ensure-Secret "steam-gamalytic-api-key"
 
 if ($ConfigureSteamApiKey) {
   $secureKey = Read-Host "Steam Web API key (empty keeps the current version)" -AsSecureString
   $plainKey = Get-PlainText $secureKey
   if (-not [string]::IsNullOrWhiteSpace($plainKey)) {
     Add-SecretVersion "steam-web-api-key" $plainKey.Trim()
+  }
+  $plainKey = $null
+  $secureKey = $null
+}
+
+if ($ConfigureGamalyticApiKey) {
+  $secureKey = Read-Host "Gamalytic API key (empty keeps the current version)" -AsSecureString
+  $plainKey = Get-PlainText $secureKey
+  if (-not [string]::IsNullOrWhiteSpace($plainKey)) {
+    Add-SecretVersion "steam-gamalytic-api-key" $plainKey.Trim()
   }
   $plainKey = $null
   $secureKey = $null
@@ -205,6 +217,9 @@ Grant-SecretRole "steam-mcp-oauth-signing-secret" $runtimeServiceAccount
 if (Get-LatestSecretVersion "steam-web-api-key") {
   Grant-SecretRole "steam-web-api-key" $runtimeServiceAccount
   Grant-SecretRole "steam-web-api-key" $workerServiceAccount
+}
+if (Get-LatestSecretVersion "steam-gamalytic-api-key") {
+  Grant-SecretRole "steam-gamalytic-api-key" $runtimeServiceAccount
 }
 
 Write-Host "[5/8] Creating Firestore Native database and seven-day TTL..." -ForegroundColor Cyan
