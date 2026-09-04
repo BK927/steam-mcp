@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from typing import Any
 
@@ -326,6 +327,17 @@ class GameService(BaseService):
             data = await self.call("steam_get_current_players", {"appid": appid}, ttl=60)
         elif view == "news":
             data = await self.call("steam_get_app_news", {"appid": appid, "count": size}, ttl=300)
+            data = {
+                **data, "result_scope": "top_n_snapshot", "requested_limit": size,
+                "upstream_pagination_supported": False,
+            }
+            for key in ("news", "items"):
+                if isinstance(data.get(key), list):
+                    data[key] = [
+                        {**item, "excerpt": html.unescape(re.sub(r"<[^>]*>", "", item["excerpt"]))}
+                        if isinstance(item, dict) and isinstance(item.get("excerpt"), str) else item
+                        for item in data[key]
+                    ]
             preferred = ("news", "items")
             untrusted_fields = ["items[].title", "items[].excerpt", "items[].url"]
         elif view == "pricing":
@@ -364,6 +376,8 @@ class GameService(BaseService):
             filters=filters,
             state={"offset": offset + size} if has_more else None,
         )
+        if view == "technical":
+            untrusted_fields = ["data"]
         return self.result_envelope(
             data,
             canonical_uri=f"steam://entity/app/{appid}",

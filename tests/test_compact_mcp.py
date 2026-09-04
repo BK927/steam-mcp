@@ -14,6 +14,7 @@ from steam_mcp.contracts import (
     collection_envelope,
     compact_size,
     entity_envelope,
+    enforce_envelope_budget,
     success_result,
 )
 from steam_mcp.cursor import CursorCodec
@@ -59,7 +60,7 @@ class FakeBackend:
         return {"operation": operation, "arguments": arguments}
 
 
-def make_server(backend: FakeBackend | None = None, *, clock: Any = None) -> Any:
+def make_server(backend: FakeBackend | None = None, *, clock: Any = None, max_result_bytes: int = 12 * 1024) -> Any:
     backend = backend or FakeBackend()
     cursor = CursorCodec(b"c" * 32, clock=clock or (lambda: 1_000.0))
     runner = InlineJobRunner()
@@ -72,6 +73,7 @@ def make_server(backend: FakeBackend | None = None, *, clock: Any = None) -> Any
             result_store=MemoryResultStore(),
             job_runner=runner,
             status={"job_backend": "memory", "process_role": "mcp"},
+            max_result_bytes=max_result_bytes,
         )
     )
 
@@ -275,9 +277,12 @@ def test_limits_review_text_and_envelope_utf8_budgets() -> None:
         [{"text": "한" * 2_000} for _ in range(20)],
         next_cursor="signed-next",
     )
-    bounded = success_result(page, "page")
-    assert compact_size(bounded.structured_content) <= 12 * 1024
-    assert bounded.structured_content["page"]["next_cursor"] == "signed-next"
+    # The serializer must not reuse an upstream cursor after deleting items.
+    with pytest.raises(ServiceError, match="without losing structured data"):
+        success_result(page, "page")
+    bounded = enforce_envelope_budget(page, continuation=lambda returned: f"after-{returned}")
+    assert compact_size(bounded) <= 12 * 1024
+    assert bounded["page"]["next_cursor"] == f"after-{len(bounded['items'])}"
     no_cursor = success_result(
         collection_envelope([{"text": "x" * 2_000}] * 20),
         "too large",
@@ -1091,3 +1096,134 @@ def test_large_job_object_has_lossless_cursor_chunks() -> None:
     reconstructed = json.loads("".join(chunks))
     assert reconstructed["store"]["description"] == "x" * 3_000
     assert reconstructed["news"]["news"][0]["excerpt"] == "y" * 1_000
+
+
+@pytest.mark.parametrize("budget", [4096, 12288, 32768])
+@pytest.mark.parametrize("text", ["가" * 9000, '한🙂"\n\\' * 1800], ids=["korean", "escaped"])
+def test_job_chunks_round_trip_unicode_and_json_escaping(budget: int, text: str) -> None:
+    class UnicodeBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            if operation == "steam_get_app_details":
+                return {"appid": 10, "description": text}
+            return await super().call(operation, arguments)
+
+    server = make_server(UnicodeBackend(), max_result_bytes=budget)
+    started = call(server, "steam_analyze", {"task": "game_overview", "refs": ["10"]})["structuredContent"]
+    cursor, chunks = "", []
+    offset = 0
+    for _ in range(100):
+        response = call(server, "steam_job_get", {"job_id": started["job"]["job_id"], "cursor": cursor})
+        assert response["isError"] is False
+        page = response["structuredContent"]
+        assert compact_size(page) <= budget
+        if page["data"].get("result_format") != "json_text_chunks":
+            assert page["data"]["store"]["description"] == text
+            return
+        assert page["page"]["returned"] == 1
+        chunk = page["items"][0]["chunk"]
+        assert chunk and page["data"]["chunk_start"] == offset
+        offset += len(chunk)
+        assert page["data"]["chunk_end"] == offset
+        chunks.append(chunk)
+        cursor = page["page"]["next_cursor"] or ""
+        if not page["page"]["has_more"]:
+            break
+    else:
+        pytest.fail("Job cursor did not terminate")
+    assert json.loads("".join(chunks))["store"]["description"] == text
+
+
+@pytest.mark.parametrize("budget", [4096, 12288])
+def test_review_byte_pages_preserve_every_id_and_final_upstream_page(budget: int) -> None:
+    class ReviewsBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((operation, arguments))
+            assert operation == "steam_get_app_review_batch"
+            first = arguments["cursor"] == "*"
+            indices = range(20) if first else range(20, 25)
+            return {
+                "reviews": [{"id": str(i), "review": "가" * 1100, "timestamp_created": 123} for i in indices],
+                "page": {"has_more": first, "next_cursor": "upstream-20" if first else None},
+            }
+
+    backend = ReviewsBackend()
+    server = make_server(backend, max_result_bytes=budget)
+    cursor, ids = "", []
+    for _ in range(50):
+        response = call(server, "steam_reviews_get", {"game": 10, "mode": "page", "cursor": cursor})
+        assert response["isError"] is False
+        page = response["structuredContent"]
+        assert compact_size(page) <= budget
+        assert page["items"]
+        ids.extend(item["id"] for item in page["items"])
+        cursor = page["page"]["next_cursor"] or ""
+        if cursor.startswith("buffer:"):
+            count = len(backend.calls)
+            mismatch = call(server, "steam_reviews_get", {"game": 10, "mode": "page", "cursor": cursor, "locale": {"language": "english"}})
+            assert mismatch["structuredContent"]["code"] == "CURSOR_MISMATCH"
+            assert len(backend.calls) == count
+            replay_args = {"game": 10, "mode": "page", "cursor": cursor}
+            left = call(server, "steam_reviews_get", replay_args)["structuredContent"]
+            right = call(server, "steam_reviews_get", replay_args)["structuredContent"]
+            assert left["items"] == right["items"]
+        if not page["page"]["has_more"]:
+            break
+    else:
+        pytest.fail("Review cursor did not terminate")
+    assert ids == [str(i) for i in range(25)]
+    assert [args["cursor"] for _, args in backend.calls] == ["*", "upstream-20"]
+
+
+def test_news_snapshot_and_completed_cancellation_are_explicit() -> None:
+    class NewsBackend(FakeBackend):
+        async def call(self, operation: str, arguments: dict[str, Any]) -> Any:
+            if operation == "steam_get_app_news":
+                return {"news": [{"title": "News", "excerpt": "Q&amp;A <b>text</b>"}]}
+            return await super().call(operation, arguments)
+
+    server = make_server(NewsBackend())
+    news = call(server, "steam_game_get", {"game": 10, "view": "news", "limit": 3})["structuredContent"]
+    assert news["data"]["result_scope"] == "top_n_snapshot"
+    assert news["data"]["requested_limit"] == 3
+    assert news["data"]["upstream_pagination_supported"] is False
+    assert news["items"][0]["excerpt"] == "Q&A text"
+    technical = call(server, "steam_game_get", {"game": 10, "view": "technical"})["structuredContent"]
+    assert technical["meta"]["untrusted_fields"] == ["data"]
+    started = call(server, "steam_analyze", {"task": "game_overview", "refs": ["10"]})["structuredContent"]
+    cancelled = call(server, "steam_job_cancel", {"job_id": started["job"]["job_id"]})
+    assert cancelled["structuredContent"]["data"] == {
+        "cancelled": False, "cancel_requested": False, "reason": "already_terminal",
+    }
+    assert "Cancelled Steam" not in cancelled["content"][0]["text"]
+
+
+def test_buffered_pages_resume_from_shared_storage_and_expire() -> None:
+    from steam_mcp.response_pager import ResponsePager
+
+    now = [1000.0]
+    codec = CursorCodec(b"s" * 32, ttl_seconds=30, clock=lambda: now[0])
+    store = MemoryResultStore()
+    first = ResponsePager(TtlLruCache(), codec, 4096, store)
+    second = ResponsePager(TtlLruCache(), codec, 4096, store)
+    source = collection_envelope([{"id": str(i), "text": "한" * 1000} for i in range(10)])
+    loads = []
+
+    async def load() -> dict[str, Any]:
+        loads.append(True)
+        return source
+
+    page = run(first.run("test", {}, load))
+    cursor = page["page"]["next_cursor"]
+    ids = [item["id"] for item in page["items"]]
+    for _ in range(20):
+        if not page["page"]["has_more"]:
+            break
+        page = run(second.run("test", {"cursor": page["page"]["next_cursor"]}, load))
+        assert compact_size(page) <= 4096
+        ids.extend(item["id"] for item in page["items"])
+    assert ids == [str(i) for i in range(10)]
+    assert len(loads) == 1
+    now[0] += 31
+    with pytest.raises(ServiceError) as error:
+        run(second.run("test", {"cursor": cursor}, load))
+    assert error.value.code == ErrorCode.CURSOR_MISMATCH

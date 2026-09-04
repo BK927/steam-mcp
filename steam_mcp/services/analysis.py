@@ -13,6 +13,7 @@ from ..contracts import (
     CooperativeCancellation,
     ErrorCode,
     ServiceError,
+    compact_size,
     job_envelope,
 )
 from ..jobs import JobRecord, JobRunner, JobStore, ResultStore, TERMINAL_STATES
@@ -116,11 +117,14 @@ class AnalysisService(BaseService):
         job_store: JobStore,
         result_store: ResultStore,
         runner: JobRunner,
+        *,
+        max_result_bytes: int = 12 * 1024,
     ) -> None:
         super().__init__(backend, cache, cursor)
         self.job_store = job_store
         self.result_store = result_store
         self.runner = runner
+        self.max_result_bytes = max_result_bytes
         bind = getattr(runner, "bind", None)
         if bind is not None:
             bind(self.run_job)
@@ -487,7 +491,8 @@ class AnalysisService(BaseService):
             chunk_budget = min(max_chars, 8_000)
             if not cursor and len(serialized) <= chunk_budget:
                 envelope["data"] = result
-                return envelope
+                if compact_size(envelope) <= self.max_result_bytes:
+                    return envelope
             if cursor:
                 state = self.cursor.decode(cursor, scope="job:result", filters=filters)
                 if state.get("mode") != "text":
@@ -495,33 +500,45 @@ class AnalysisService(BaseService):
                 offset = int(state.get("offset", 0))
                 if offset < 0 or offset >= len(serialized):
                     raise ServiceError(ErrorCode.CURSOR_MISMATCH, "The job cursor offset is invalid.")
-            chunk = serialized[offset:offset + chunk_budget]
-            next_offset = offset + len(chunk)
-            has_more = next_offset < len(serialized)
-            envelope["data"] = {
-                "result_format": "json_text_chunks",
-                "encoding": "utf-8",
-                "total_chars": len(serialized),
-                "chunk_start": offset,
-                "chunk_end": next_offset,
-                "complete": not has_more,
-            }
-            envelope["items"] = [{"chunk": chunk}]
-            envelope["page"] = {
-                "returned": 1,
-                "has_more": has_more,
-                "next_cursor": self.cursor.encode(
-                    scope="job:result",
-                    filters=filters,
-                    state={"mode": "text", "offset": next_offset},
-                    expires_at=job.expires_at,
-                ) if has_more else None,
-            }
             envelope["meta"]["warnings"].append(
                 "Job result is returned as lossless JSON text chunks; concatenate items[].chunk in cursor order before parsing."
             )
             if envelope["meta"]["untrusted_fields"]:
                 envelope["meta"]["untrusted_fields"] = ["items[].chunk"]
+
+            def set_chunk(length: int) -> None:
+                chunk = serialized[offset:offset + length]
+                next_offset = offset + len(chunk)
+                has_more = next_offset < len(serialized)
+                envelope["data"] = {
+                    "result_format": "json_text_chunks", "encoding": "utf-8",
+                    "total_chars": len(serialized), "chunk_start": offset,
+                    "chunk_end": next_offset, "complete": not has_more,
+                }
+                envelope["items"] = [{"chunk": chunk}]
+                envelope["page"] = {
+                    "returned": 1, "has_more": has_more,
+                    "next_cursor": self.cursor.encode(
+                        scope="job:result", filters=filters,
+                        state={"mode": "text", "offset": next_offset}, expires_at=job.expires_at,
+                    ) if has_more else None,
+                }
+
+            # Include JSON escaping, UTF-8, metadata and the signed cursor in the budget.
+            high = min(chunk_budget, len(serialized) - offset)
+            set_chunk(high)
+            if compact_size(envelope) > self.max_result_bytes:
+                low = 0
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    set_chunk(middle)
+                    if compact_size(envelope) <= self.max_result_bytes:
+                        low = middle
+                    else:
+                        high = middle - 1
+                if low == 0:
+                    raise ServiceError(ErrorCode.UPSTREAM_ERROR, "Job metadata exceeds the response byte budget.")
+                set_chunk(low)
             return envelope
         if cursor:
             state = self.cursor.decode(cursor, scope="job:result", filters=filters)
@@ -545,7 +562,14 @@ class AnalysisService(BaseService):
         return envelope
 
     async def cancel(self, job_id: str) -> dict[str, Any]:
-        return job_envelope(self.public_job(await self.job_store.request_cancel(job_id)))
+        job = await self.job_store.request_cancel(job_id)
+        envelope = job_envelope(self.public_job(job))
+        envelope["data"] = {
+            "cancelled": job.status == "cancelled",
+            "cancel_requested": job.status == "cancel_requested",
+            "reason": "already_terminal" if job.status in TERMINAL_STATES else "cancellation_requested",
+        }
+        return envelope
 
     async def _require_job(self, job_id: str) -> JobRecord:
         job = await self.job_store.get(job_id)

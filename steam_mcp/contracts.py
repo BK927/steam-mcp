@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -180,13 +181,14 @@ def compact_size(value: Any) -> int:
 
 
 def bounded_value(value: Any, max_chars: int) -> tuple[Any, bool]:
-    """Bound long strings recursively without discarding object structure."""
+    """Bound content text while preserving IDs, dates, numbers and object shape."""
     remaining = max(500, max_chars)
     truncated = False
+    text_fields = {"description", "short_description", "about_the_game", "text", "review", "developer_response", "excerpt", "contents"}
 
-    def walk(item: Any) -> Any:
+    def walk(item: Any, key: str = "") -> Any:
         nonlocal remaining, truncated
-        if isinstance(item, str):
+        if isinstance(item, str) and key in text_fields:
             if len(item) <= remaining:
                 remaining -= len(item)
                 return item
@@ -195,21 +197,9 @@ def bounded_value(value: Any, max_chars: int) -> tuple[Any, bool]:
             remaining = 0
             return item[:kept] + "…"
         if isinstance(item, list):
-            out = []
-            for child in item:
-                if remaining <= 0:
-                    truncated = True
-                    break
-                out.append(walk(child))
-            return out
+            return [walk(child, key) for child in item]
         if isinstance(item, dict):
-            out = {}
-            for key, child in item.items():
-                if remaining <= 0:
-                    truncated = True
-                    break
-                out[key] = walk(child)
-            return out
+            return {key: walk(child, key) for key, child in item.items()}
         return item
 
     return walk(value), truncated
@@ -220,15 +210,16 @@ def enforce_envelope_budget(
     *,
     default_bytes: int = 12 * 1024,
     hard_bytes: int = 32 * 1024,
+    continuation: Callable[[int], str | None] | None = None,
 ) -> dict[str, Any]:
     """Guarantee the final compact UTF-8 envelope fits the public byte budget."""
     value = _fixed_envelope(envelope)
+    default_bytes = min(default_bytes, hard_bytes)
     if compact_size(value) <= default_bytes:
         return value
 
     warnings = value["meta"]["warnings"]
-    if "Result reduced to the 12 KiB MCP default budget." not in warnings:
-        warnings.append("Result reduced to the 12 KiB MCP default budget.")
+    warnings.append("Content text was shortened to the configured byte budget; structural fields were preserved.")
     items = value["items"]
     original_item_count = len(items)
     compacted_item_fields = False
@@ -257,36 +248,22 @@ def enforce_envelope_budget(
         value["data"]["truncation"] = truncation
     value["job"], _ = bounded_value(value["job"], default_bytes // 4)
 
-    while items and compact_size(value) > default_bytes:
+    while len(items) > 1 and continuation and compact_size(value) > default_bytes:
         items.pop()
+        next_cursor = continuation(len(items))
+        value["page"]["next_cursor"] = next_cursor
         value["page"]["returned"] = len(items)
         value["page"]["has_more"] = bool(next_cursor)
         value["data"]["truncation"]["returned_items"] = len(items)
         value["data"]["truncation"]["omitted_items"] = original_item_count - len(items)
-    if compact_size(value) > default_bytes:
-        value = {
-            "schema_version": SCHEMA_VERSION,
-            "kind": value.get("kind", "entity"),
-            "data": {
-                "truncated": True,
-                "truncation": {
-                    "original_items": original_item_count,
-                    "returned_items": 0,
-                    "omitted_items": original_item_count,
-                    "item_fields_compacted": compacted_item_fields,
-                },
-            },
-            "items": [],
-            "job": {},
-            "page": {
-                "returned": 0,
-                "has_more": bool(next_cursor),
-                "next_cursor": next_cursor,
-            },
-            "meta": _meta(warnings=["Result exceeded 12 KiB and was reduced to a placeholder."]),
-        }
+        value["data"]["truncation"]["content_omitted"] = True
+        value["data"]["truncation"]["continuation_available"] = True
     if compact_size(value) > hard_bytes or compact_size(value) > default_bytes:
-        raise ServiceError(ErrorCode.PROVIDER_UNAVAILABLE, "Unable to enforce the 32 KiB result limit.")
+        raise ServiceError(
+            ErrorCode.UPSTREAM_ERROR,
+            "The response cannot fit the byte budget without losing structured data. Use a smaller limit or selection.",
+            details={"reason": "max_result_bytes", "max_bytes": default_bytes},
+        )
     return value
 
 

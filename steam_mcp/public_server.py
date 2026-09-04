@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
@@ -16,6 +16,7 @@ from .cache import TtlLruCache
 from .contracts import ErrorCode, ServiceError, error_result, success_result
 from .cursor import CursorCodec
 from .jobs import JobRunner, JobStore, ResultStore
+from .response_pager import ResponsePager
 from .services import (
     AnalysisService,
     CommunityService,
@@ -62,6 +63,7 @@ class ServerDependencies:
     job_runner: JobRunner
     status: dict[str, Any]
     max_result_bytes: int = 12 * 1024
+    response_cache: TtlLruCache = field(default_factory=lambda: TtlLruCache(max_entries=64, ttl_seconds=86_400))
 
 
 READ_ONLY = {
@@ -135,12 +137,17 @@ def create_server(
         dependencies.job_store,
         dependencies.result_store,
         dependencies.job_runner,
+        max_result_bytes=dependencies.max_result_bytes,
+    )
+    response_pager = ResponsePager(
+        dependencies.response_cache, dependencies.cursor, dependencies.max_result_bytes,
+        dependencies.result_store if dependencies.status.get("job_backend") == "gcp" else None,
     )
 
-    async def invoke(action: Any, summary: str, schema_uri: str) -> CallToolResult:
+    async def invoke(action: Any, summary: str, schema_uri: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
         try:
             return success_result(
-                await action,
+                await response_pager.run(schema_uri, arguments, action) if arguments is not None else await action(),
                 summary,
                 max_bytes=dependencies.max_result_bytes,
             )
@@ -172,7 +179,7 @@ def create_server(
             )
 
     @server.tool(
-        description="Read Steam game, pricing, live, technical or multi-provider analytics data.",
+        description="Read Steam game data. select: summary/store, technical, achievements only. Options and fields: steam://schema/steam_game_get.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
@@ -189,9 +196,10 @@ def create_server(
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
-            game_service.get(game, view, select or [], options or {}, cursor, limit, locale or {}),
+            lambda: game_service.get(game, view, select or [], options or {}, cursor, limit, locale or {}),
             f"Steam game {game}: {view}",
             f"steam://schema/steam_game_get.{view}",
+            {"game": game, "view": view, "select": select or [], "options": options or {}, "cursor": cursor, "limit": limit, "locale": locale or {}},
         )
 
     @server.tool(
@@ -211,7 +219,7 @@ def create_server(
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
-            player_service.get(
+            lambda: player_service.get(
                 player,
                 view,
                 game,
@@ -223,6 +231,7 @@ def create_server(
             ),
             f"Steam player {player or 'default'}: {view}",
             f"steam://schema/steam_player_get.{view}",
+            {"player": player, "view": view, "game": game, "select": select or [], "options": options or {}, "cursor": cursor, "limit": limit, "locale": locale or {}},
         )
 
     @server.tool(
@@ -240,13 +249,14 @@ def create_server(
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
-            search_service.search(mode, query, filters or {}, cursor, limit, locale or {}),
+            lambda: search_service.search(mode, query, filters or {}, cursor, limit, locale or {}),
             f"Steam search: {mode}",
             f"steam://schema/steam_search.{mode}",
+            {"mode": mode, "query": query, "filters": filters or {}, "cursor": cursor, "limit": limit, "locale": locale or {}},
         )
 
     @server.tool(
-        description="Read a bounded Steam review summary or a signed-cursor page of untrusted review text.",
+        description="Read review summaries or untrusted review pages. Language: locale.language. Filters: steam://schema/steam_reviews_get.",
         annotations=READ_ONLY,
         meta=OAUTH_META,
         structured_output=False,
@@ -261,7 +271,7 @@ def create_server(
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
-            reviews_service.get(
+            lambda: reviews_service.get(
                 game,
                 mode,
                 filters or {},
@@ -272,6 +282,7 @@ def create_server(
             ),
             f"Steam reviews for {game}: {mode}",
             f"steam://schema/steam_reviews_get.{mode}",
+            {"game": game, "mode": mode, "filters": filters or {}, "cursor": cursor, "limit": limit, "max_text_chars_per_item": max_text_chars_per_item, "locale": locale or {}},
         )
 
     @server.tool(
@@ -287,7 +298,7 @@ def create_server(
         locale: dict[str, str] | None = None,
     ) -> CallToolResult:
         return await invoke(
-            community_service.get(kind, ref, options or {}, locale or {}),
+            lambda: community_service.get(kind, ref, options or {}, locale or {}),
             f"Steam community {kind}: {ref}",
             f"steam://schema/steam_community_get.{kind}",
         )
@@ -307,7 +318,7 @@ def create_server(
         request_id: str = "",
     ) -> CallToolResult:
         return await invoke(
-            analysis_service.start(task, refs, options or {}, request_id),
+            lambda: analysis_service.start(task, refs, options or {}, request_id),
             f"Steam analysis: {task}",
             f"steam://schema/steam_analyze.{task}",
         )
@@ -325,9 +336,10 @@ def create_server(
         max_chars: JOB_TEXT_LIMIT = 12_000,
     ) -> CallToolResult:
         return await invoke(
-            analysis_service.get(job_id, cursor, limit, max_chars),
+            lambda: analysis_service.get(job_id, cursor, limit, max_chars),
             f"Steam analysis job {job_id}",
             "steam://schema/steam_job_get",
+            {"job_id": job_id, "cursor": cursor, "limit": limit, "max_chars": max_chars},
         )
 
     @server.tool(
@@ -338,8 +350,8 @@ def create_server(
     )
     async def steam_job_cancel(job_id: str) -> CallToolResult:
         return await invoke(
-            analysis_service.cancel(job_id),
-            f"Cancelled Steam job {job_id}",
+            lambda: analysis_service.cancel(job_id),
+            f"Cancellation request processed for Steam job {job_id}",
             "steam://schema/steam_job_cancel",
         )
 
@@ -424,6 +436,7 @@ def _catalog(status: dict[str, Any]) -> dict[str, Any]:
         "community_kinds": ["package", "workshop", "market"],
         "analysis_tasks": ["friend_ownership", "review_insights", "game_overview", "player_compare", "library_insights", "purchase_decision", "recommendations", "coop_plan"],
         "limits": {"default_result_bytes": 12_288, "hard_result_bytes": 32_768, "max_list_items": 100, "review_text_default": 1_200, "review_text_max": 4_000},
+        "buffered_pages": {"max_entries": 64, "max_snapshot_bytes": 512 * 1024, "storage": "result_store+memory" if status.get("job_backend") == "gcp" else "process-memory", "missing_page": "Restart the query after an explicit cursor expiry error; items are never silently skipped."},
         "capabilities": {
             "community_market": {
                 "status": status.get("community_market", "experimental"),
