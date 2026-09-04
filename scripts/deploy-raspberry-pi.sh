@@ -76,15 +76,24 @@ if [[ ! -x "$RELEASE/.venv/bin/python" ]]; then
     --no-cache-dir --no-build-isolation --no-deps "$RELEASE"
 fi
 
-if [[ -f "$ENV_FILE" ]]; then
-  # Preserve every credential and stable signing secret during code-only updates.
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-fi
+preserved_env_value() {
+  local key="$1"
+  local line=""
+  if [[ -f "$ENV_FILE" ]]; then
+    line="$(grep -m1 -E "^${key}=" "$ENV_FILE" || true)"
+  fi
+  printf '%s' "${line#*=}"
+}
 
-STEAM_API_KEY="${STEAM_API_KEY:-}"
-GAMALYTIC_API_KEY="${GAMALYTIC_API_KEY:-}"
-STEAM_USER="${STEAM_USER:-}"
+# Preserve credentials and stable signing secrets without importing stale
+# deployment settings such as PUBLIC_BASE_URL or the selected Funnel port.
+STEAM_API_KEY="${STEAM_API_KEY:-$(preserved_env_value STEAM_API_KEY)}"
+GAMALYTIC_API_KEY="${GAMALYTIC_API_KEY:-$(preserved_env_value GAMALYTIC_API_KEY)}"
+STEAM_USER="${STEAM_USER:-$(preserved_env_value STEAM_USER)}"
+MCP_ACCESS_TOKEN="${MCP_ACCESS_TOKEN:-$(preserved_env_value MCP_ACCESS_TOKEN)}"
+STEAM_CURSOR_SECRET="${STEAM_CURSOR_SECRET:-$(preserved_env_value STEAM_CURSOR_SECRET)}"
+MCP_OAUTH_LOGIN_SECRET="${MCP_OAUTH_LOGIN_SECRET:-$(preserved_env_value MCP_OAUTH_LOGIN_SECRET)}"
+MCP_OAUTH_SIGNING_SECRET="${MCP_OAUTH_SIGNING_SECRET:-$(preserved_env_value MCP_OAUTH_SIGNING_SECRET)}"
 MCP_ACCESS_TOKEN="${MCP_ACCESS_TOKEN:-$(openssl rand -hex 32)}"
 STEAM_CURSOR_SECRET="${STEAM_CURSOR_SECRET:-$(openssl rand -hex 32)}"
 MCP_OAUTH_LOGIN_SECRET="${MCP_OAUTH_LOGIN_SECRET:-$(openssl rand -hex 32)}"

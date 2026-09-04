@@ -38,6 +38,11 @@ assert set(companion["mcpServers"]) == {"steam-mcp"}
 remote = companion["mcpServers"]["steam-mcp"]
 assert remote["type"] == "http" and remote["url"].endswith("/mcp")
 assert remote["bearer_token_env_var"] == "STEAM_MCP_ACCESS_TOKEN"
+
+pi_deploy = (ROOT / "scripts" / "deploy-raspberry-pi.sh").read_text(encoding="utf-8")
+assert 'PUBLIC_PORT="${STEAM_MCP_PUBLIC_PORT:-8443}"' in pi_deploy
+assert 'source "$ENV_FILE"' not in pi_deploy
+assert "preserved_env_value MCP_ACCESS_TOKEN" in pi_deploy
 assert manifest["version"] == EXPECTED_VERSION
 assert server["version"] == EXPECTED_VERSION
 assert {tool["name"] for tool in manifest["tools"]} == EXPECTED_TOOLS

@@ -11,6 +11,7 @@ A concise, one-line-per-change history. Versions follow
 - Added a rollback-aware Raspberry Pi systemd/Funnel deployment and public-path analytics smoke test.
 - Switched the authoritative remote plugin endpoint from Cloud Run to the Raspberry Pi Funnel while retaining Cloud Run as a disabled rollback target.
 - Moved the Raspberry Pi Steam Funnel default to HTTPS port 8443 for ChatGPT OAuth discovery compatibility while keeping YouTube on 443.
+- Fixed Raspberry Pi redeployments so preserved credentials cannot overwrite a newly selected public URL or Funnel port.
 
 ## [2.1.1] — ChatGPT OAuth redirect hotfix
 - Allowed the exact ChatGPT callback origin in the login page form policy so Chrome can follow the successful authorization redirect.
