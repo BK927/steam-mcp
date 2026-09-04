@@ -221,6 +221,12 @@ FUNNEL_CONFIGURED=true
 if [[ -n "$SHARED_HTTPS_PATH" ]]; then
   tailscale funnel --bg --https=443 --set-path="$SHARED_HTTPS_PATH" --yes \
     "http://127.0.0.1:$LOCAL_PORT" >/dev/null
+  tailscale funnel --bg --https=443 \
+    --set-path="/.well-known/oauth-authorization-server$SHARED_HTTPS_PATH" --yes \
+    "http://127.0.0.1:$LOCAL_PORT/.well-known/oauth-authorization-server" >/dev/null
+  tailscale funnel --bg --https=443 \
+    --set-path="/.well-known/oauth-protected-resource$SHARED_HTTPS_PATH/mcp" --yes \
+    "http://127.0.0.1:$LOCAL_PORT/.well-known/oauth-protected-resource/mcp" >/dev/null
 fi
 
 for attempt in $(seq 1 30); do

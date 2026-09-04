@@ -45,6 +45,8 @@ assert 'source "$ENV_FILE"' not in pi_deploy
 assert "preserved_env_value MCP_ACCESS_TOKEN" in pi_deploy
 assert 'OAUTH_BASE_URL="${STEAM_MCP_OAUTH_BASE_URL:-$PUBLIC_BASE_URL}"' in pi_deploy
 assert 'SHARED_HTTPS_PATH="${STEAM_MCP_SHARED_HTTPS_PATH:-}"' in pi_deploy
+assert '--set-path="/.well-known/oauth-authorization-server$SHARED_HTTPS_PATH"' in pi_deploy
+assert '--set-path="/.well-known/oauth-protected-resource$SHARED_HTTPS_PATH/mcp"' in pi_deploy
 assert manifest["version"] == EXPECTED_VERSION
 assert server["version"] == EXPECTED_VERSION
 assert {tool["name"] for tool in manifest["tools"]} == EXPECTED_TOOLS
