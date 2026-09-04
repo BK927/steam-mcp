@@ -43,6 +43,8 @@ pi_deploy = (ROOT / "scripts" / "deploy-raspberry-pi.sh").read_text(encoding="ut
 assert 'PUBLIC_PORT="${STEAM_MCP_PUBLIC_PORT:-8443}"' in pi_deploy
 assert 'source "$ENV_FILE"' not in pi_deploy
 assert "preserved_env_value MCP_ACCESS_TOKEN" in pi_deploy
+assert 'OAUTH_BASE_URL="${STEAM_MCP_OAUTH_BASE_URL:-$PUBLIC_BASE_URL}"' in pi_deploy
+assert 'SHARED_HTTPS_PATH="${STEAM_MCP_SHARED_HTTPS_PATH:-}"' in pi_deploy
 assert manifest["version"] == EXPECTED_VERSION
 assert server["version"] == EXPECTED_VERSION
 assert {tool["name"] for tool in manifest["tools"]} == EXPECTED_TOOLS

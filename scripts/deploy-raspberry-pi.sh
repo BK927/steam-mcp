@@ -7,6 +7,8 @@ SOURCE_REPOSITORY="${STEAM_MCP_SOURCE_REPOSITORY:-BK927/steam-mcp}"
 PUBLIC_BASE_URL="${STEAM_MCP_PUBLIC_BASE_URL:?Set STEAM_MCP_PUBLIC_BASE_URL to the public HTTPS origin}"
 LOCAL_PORT="${STEAM_MCP_LOCAL_PORT:-8082}"
 PUBLIC_PORT="${STEAM_MCP_PUBLIC_PORT:-8443}"
+OAUTH_BASE_URL="${STEAM_MCP_OAUTH_BASE_URL:-$PUBLIC_BASE_URL}"
+SHARED_HTTPS_PATH="${STEAM_MCP_SHARED_HTTPS_PATH:-}"
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
   echo "This deployment expects aarch64." >&2
@@ -19,6 +21,20 @@ fi
 if [[ ! "$PUBLIC_BASE_URL" =~ ^https://[^/]+:${PUBLIC_PORT}$ ]]; then
   echo "STEAM_MCP_PUBLIC_BASE_URL must be an HTTPS origin ending in :$PUBLIC_PORT." >&2
   exit 1
+fi
+if [[ ! "$OAUTH_BASE_URL" =~ ^https://[^/?#]+(/[^?#]+)?$ ]]; then
+  echo "STEAM_MCP_OAUTH_BASE_URL must be an absolute HTTPS URL without a query or fragment." >&2
+  exit 1
+fi
+if [[ -n "$SHARED_HTTPS_PATH" ]]; then
+  if [[ ! "$SHARED_HTTPS_PATH" =~ ^/[A-Za-z0-9._~-]+$ ]]; then
+    echo "STEAM_MCP_SHARED_HTTPS_PATH must be one simple absolute path segment." >&2
+    exit 1
+  fi
+  if [[ "$OAUTH_BASE_URL" != *"$SHARED_HTTPS_PATH" ]]; then
+    echo "STEAM_MCP_OAUTH_BASE_URL must end in STEAM_MCP_SHARED_HTTPS_PATH." >&2
+    exit 1
+  fi
 fi
 if [[ ! "$LOCAL_PORT" =~ ^[0-9]+$ ]] || ((LOCAL_PORT < 1024 || LOCAL_PORT > 65535)); then
   echo "STEAM_MCP_LOCAL_PORT must be an unprivileged TCP port." >&2
@@ -33,6 +49,9 @@ UNIT_ROOT="$HOME/.config/systemd/user"
 UNIT_FILE="$UNIT_ROOT/$APP_ID.service"
 CURRENT="$ROOT/current"
 PUBLIC_HOST="${PUBLIC_BASE_URL#https://}"
+OAUTH_HOST="${OAUTH_BASE_URL#https://}"
+OAUTH_HOST="${OAUTH_HOST%%/*}"
+OAUTH_ORIGIN="https://$OAUTH_HOST"
 PREVIOUS_RELEASE="$(readlink -f "$CURRENT" 2>/dev/null || true)"
 ACTIVATED=false
 FUNNEL_CONFIGURED=false
@@ -118,12 +137,12 @@ HEALTH_PATH=/healthz
 HTTP_MAX_BODY_BYTES=2097152
 MCP_ACCESS_TOKEN=$MCP_ACCESS_TOKEN
 MCP_ALLOW_UNAUTHENTICATED=false
-PUBLIC_BASE_URL=$PUBLIC_BASE_URL
-MCP_ALLOWED_HOSTS=$PUBLIC_HOST
-MCP_ALLOWED_ORIGINS=$PUBLIC_BASE_URL
+PUBLIC_BASE_URL=$OAUTH_BASE_URL
+MCP_ALLOWED_HOSTS=$PUBLIC_HOST,$OAUTH_HOST
+MCP_ALLOWED_ORIGINS=$PUBLIC_BASE_URL,$OAUTH_ORIGIN
 MCP_OAUTH_ENABLED=true
-MCP_OAUTH_ISSUER=$PUBLIC_BASE_URL
-MCP_OAUTH_RESOURCE=$PUBLIC_BASE_URL/mcp
+MCP_OAUTH_ISSUER=$OAUTH_BASE_URL
+MCP_OAUTH_RESOURCE=$OAUTH_BASE_URL/mcp
 MCP_OAUTH_SCOPE=steam.read
 MCP_OAUTH_LOGIN_SECRET=$MCP_OAUTH_LOGIN_SECRET
 MCP_OAUTH_SIGNING_SECRET=$MCP_OAUTH_SIGNING_SECRET
@@ -199,6 +218,10 @@ curl --fail --silent --show-error \
 tailscale serve get-config --all "$work_dir/tailscale-before.json"
 tailscale funnel --bg --https="$PUBLIC_PORT" --yes "http://127.0.0.1:$LOCAL_PORT" >/dev/null
 FUNNEL_CONFIGURED=true
+if [[ -n "$SHARED_HTTPS_PATH" ]]; then
+  tailscale funnel --bg --https=443 --set-path="$SHARED_HTTPS_PATH" --yes \
+    "http://127.0.0.1:$LOCAL_PORT" >/dev/null
+fi
 
 for attempt in $(seq 1 30); do
   if curl --fail --silent --show-error "$PUBLIC_BASE_URL/healthz" >/dev/null; then
@@ -222,3 +245,4 @@ echo "LOCAL_HEALTH=ok"
 echo "UNAUTHENTICATED_MCP=$status"
 echo "OAUTH_DISCOVERY=ok"
 echo "PUBLIC_MCP=$PUBLIC_BASE_URL/mcp"
+echo "OAUTH_MCP=$OAUTH_BASE_URL/mcp"
