@@ -14,6 +14,7 @@ A concise, one-line-per-change history. Versions follow
 - Fixed Raspberry Pi redeployments so preserved credentials cannot overwrite a newly selected public URL or Funnel port.
 - Added an optional shared-port `/steam` OAuth alias for ChatGPT while retaining the dedicated 8443 Steam endpoint for bearer clients.
 - Persisted the RFC well-known OAuth discovery routes for the shared `/steam` alias across Raspberry Pi redeployments.
+- Kept the `/steam` issuer prefix when the personal OAuth login form submits its access key.
 
 ## [2.1.1] — ChatGPT OAuth redirect hotfix
 - Allowed the exact ChatGPT callback origin in the login page form policy so Chrome can follow the successful authorization redirect.

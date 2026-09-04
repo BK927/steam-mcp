@@ -152,6 +152,43 @@ def test_login_page_allows_the_chatgpt_callback_redirect() -> None:
     assert "form-action *" not in csp
 
 
+def test_login_form_preserves_an_issuer_path_prefix() -> None:
+    issuer = f"{ISSUER}/steam"
+    resource = f"{issuer}/mcp"
+    runtime = create_oauth_runtime(
+        issuer=issuer,
+        resource=resource,
+        scope="steam.read",
+        login_secret=LOGIN_SECRET,
+        signing_secret=SIGNING_SECRET,
+        access_token="static-" + "c" * 40,
+        store="memory",
+        project="",
+        collection="test_codes",
+    )
+    provider = runtime.provider
+    client = asyncio.run(provider.get_client(CHATGPT_STABLE_CLIENT_ID))
+    assert client is not None
+    login_url = asyncio.run(
+        provider.authorize(
+            client,
+            AuthorizationParams(
+                state="opaque-state",
+                scopes=["steam.read"],
+                code_challenge="x" * 43,
+                redirect_uri=AnyUrl(CHATGPT_STABLE_REDIRECT_URI),
+                redirect_uri_provided_explicitly=True,
+                resource=resource,
+            ),
+        )
+    )
+
+    response = asyncio.run(provider.login(_request("GET", login_url)))
+
+    assert response.status_code == 200
+    assert f'action="{issuer}/oauth/login"'.encode() in response.body
+
+
 def test_login_rejects_wrong_secret_without_consuming_transaction() -> None:
     runtime = _runtime()
     provider = runtime.provider

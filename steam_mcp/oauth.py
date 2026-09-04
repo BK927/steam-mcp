@@ -283,7 +283,7 @@ class PersonalOAuthProvider:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect Steam MCP</title><style>body{{font:16px system-ui;max-width:32rem;margin:12vh auto;padding:1.5rem;color:#17202a}}input,button{{box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0}}button{{cursor:pointer}}.error{{color:#b42318}}</style></head>
 <body><h1>Connect Steam MCP</h1><p>Enter the private access key for this personal server.</p>{error_html}
-<form method="post" action="/oauth/login"><input type="hidden" name="transaction" value="{html.escape(transaction, quote=True)}">
+<form method="post" action="{html.escape(f'{self.issuer}/oauth/login', quote=True)}"><input type="hidden" name="transaction" value="{html.escape(transaction, quote=True)}">
 <label>Access key<input type="password" name="access_key" autocomplete="current-password" required autofocus></label>
 <button type="submit">Authorize ChatGPT</button></form></body></html>"""
         return HTMLResponse(
